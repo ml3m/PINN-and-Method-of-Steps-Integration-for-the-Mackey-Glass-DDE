@@ -1,4 +1,4 @@
-Mackey–Glass delay equation: classical integrator vs PINN (reproduction)
+Mackey–Glass delay equation: classical integrator vs PINN
 =======================================================================
 
 This repository contains code to reproduce the **Mackey–Glass** benchmark from the
@@ -19,7 +19,7 @@ What is included
 
 * ``run_synasc_comparison.py`` — **Main experiment:** adaptive RK45
   method-of-steps trajectory, high-accuracy RK4 reference, PINN training with
-  windowed time domains, metrics, and publication-style figures.
+  windowed time domains, metrics, and figures.
 
 * ``run_synasc_multi_seed.py`` — **Optional robustness study:** repeats the main
   experiment for several pseudorandom seeds and aggregates uncertainty in metrics
@@ -36,7 +36,7 @@ What is included
 * ``configs/`` — YAML recipes for horizons, windowing, and training hyperparameters
   described in the article.
 
-* ``results/`` — Default location for run outputs (large files are git-ignored).
+* ``results/`` — Default location for run outputs.
 
 .. _PyTorch Get Started: https://pytorch.org/get-started/locally/
 
@@ -157,14 +157,6 @@ Each run writes under ``--output-dir``:
 
 Generated content under ``results/`` is excluded from git by default
 (``results/.gitignore``).
-
-
-Thin wrappers in larger projects
----------------------------------
-
-If another repository vendors these scripts behind small launcher files at its
-**root**, prefer executing **this** directory’s ``run_synasc_comparison.py`` and
-``run_synasc_multi_seed.py`` directly so paths and configs stay unambiguous.
 
 
 License and contact
