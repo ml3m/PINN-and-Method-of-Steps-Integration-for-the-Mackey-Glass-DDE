@@ -46,9 +46,20 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+except ImportError as _e:
+    v_root = Path(__file__).resolve().parent
+    raise SystemExit(
+        "PyTorch is required but not installed.\n\n"
+        "From the directory that contains this script, run:\n"
+        f"  pip install -r {v_root / 'requirements.txt'}\n\n"
+        "That file installs a CPU build of PyTorch suitable for reproduction on any\n"
+        "machine. For GPU instructions see README.rst and requirements-rocm.txt.\n\n"
+        f"Original error: {_e}"
+    ) from _e
 
 import matplotlib
 matplotlib.use("Agg")

@@ -67,8 +67,12 @@ Requirements:
 
 * A **virtual environment** is strongly recommended.
 
-* **PyTorch** must be installed for **your** hardware (CPU, NVIDIA CUDA, or
-  AMD ROCm).  See https://pytorch.org/get-started/locally/
+* **PyTorch** is installed automatically by ``requirements.txt`` (CPU wheels from
+  PyTorch’s index—works on typical reviewer laptops without an NVIDIA stack).
+  Training is slower on CPU than on a GPU but reproduction runs end-to-end.
+
+* For **NVIDIA CUDA** or **AMD ROCm**, reinstall **torch** afterward — see
+  https://pytorch.org/get-started/locally/ and ``requirements-rocm.txt``.
 
 From the bundle root (directory that contains ``README.rst``)::
 
@@ -77,11 +81,7 @@ From the bundle root (directory that contains ``README.rst``)::
    pip install -U pip
    pip install -r requirements.txt
 
-Then install **torch** and optional CUDA/ROCm builds as instructed on the
-PyTorch website.  For **AMD ROCm**, follow the comments in
-``requirements-rocm.txt`` (second-step ``pip install torch
---index-url https://download.pytorch.org/whl/rocm6.x``).
-
+No separate PyTorch step is required unless you switch to a GPU-specific wheel.
 
 Quick start (single run)
 ------------------------

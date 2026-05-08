@@ -668,13 +668,12 @@ def main() -> int:
     if not f_child_has_torch(str(v_args.python)):
         print(
             "Error: PyTorch is not importable with "
-            f"{v_args.python!r}. SYNASC subprocesses need torch.\n"
-            "  • ROCm: pip install -r requirements.txt && pip install -r requirements-rocm.txt "
-            "then a PyTorch ROCm wheel, e.g.\n"
-            "      pip install torch --index-url https://download.pytorch.org/whl/rocm6.3\n"
-            "    (see comments in requirements-rocm.txt.)\n"
-            "  • Or run with --python pointing to an interpreter that already has torch "
-            "(e.g. system python3 if your .venv is TensorFlow-only).",
+            f"{v_args.python!r}. Child runs need torch.\n"
+            f"  • In the bundle root: pip install -r {SYNASC_ROOT / 'requirements.txt'}\n"
+            "    (that file installs a CPU PyTorch build suitable for reproduction.)\n"
+            "  • For AMD ROCm or NVIDIA CUDA, reinstall torch per README.rst and "
+            "requirements-rocm.txt / https://pytorch.org/get-started/\n"
+            "  • Or pass --python to an interpreter where torch already works.",
             file=sys.stderr,
         )
         return 1
