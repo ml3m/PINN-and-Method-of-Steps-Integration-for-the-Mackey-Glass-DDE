@@ -1,21 +1,25 @@
 SYNASC experiments: Mackey–Glass classical vs PINN
 ====================================================
 
-This directory is a **self-contained reproducibility bundle** for the SYNASC /
-IEEE-style comparison between a **method-of-steps classical DDE solver** and a
-**PyTorch physics-informed neural network (PINN)** on the scalar Mackey–Glass
-equation with fixed delay.
+This tree is a **self-contained reproducibility bundle** for the SYNASC / IEEE-style
+comparison between a **method-of-steps classical DDE solver** and a **PyTorch
+physics-informed neural network (PINN)** on the scalar Mackey–Glass equation with
+fixed delay.
 
 The method and experimental protocol are described in the companion **SYNASC / IEEE
 submission** associated with this archive. Cite that publication when you use this
 code or reproduce its tables and figures.
 
-All configuration YAML files, Python drivers, dependency specifications, and the
-default **results** tree live **under this folder**. Clone the public GitHub
-repository **PINN-and-Method-of-Steps-Integration-for-the-Mackey-Glass-DDE**, then
-``cd`` into the directory that contains this ``README.rst`` (in the authors'
-layout that is the ``synasc/`` folder inside the repo).  Run all commands below
-from that directory so relative paths resolve correctly.
+**Canonical public repository:** https://github.com/ml3m/PINN-and-Method-of-Steps-Integration-for-the-Mackey-Glass-DDE
+
+After cloning, your **working directory** should be the folder that contains this
+``README.rst`` and the Python drivers:
+
+* **On GitHub:** repository **root** (scripts and ``configs/`` live next to this file).
+* **Inside a larger private monorepo:** typically the ``synasc/`` subdirectory—use
+  that path the same way.
+
+Run all commands below from that directory.
 
 .. contents:: **Table of contents**
    :local:
@@ -27,14 +31,14 @@ Layout
 
 .. code-block:: text
 
-   synasc/
-   ├── README.rst                 ← This file
+   ./
+   ├── README.rst                  ← This file
    ├── requirements.txt           ← Core Python dependencies
    ├── requirements-rocm.txt      ← Notes for AMD ROCm / PyTorch ROCm wheels
-   ├── run_synasc_comparison.py # Main driver (classical + PINN + figures)
-   ├── run_synasc_multi_seed.py # Optional: multi-seed orchestration + plots
-   ├── configs/                 # Experiment YAML files (copied for isolation)
-   └── results/                 # Default output root (artifacts git-ignored)
+   ├── run_synasc_comparison.py   ← Main driver (classical + PINN + figures)
+   ├── run_synasc_multi_seed.py  ← Optional: multi-seed orchestration + plots
+   ├── configs/                   ← Experiment YAML files
+   └── results/                   ← Default output root (artifacts git-ignored)
 
 
 Relation to the paper
@@ -46,18 +50,12 @@ hyperparameter tables). After changing code or configs in this bundle, rerun the
 drivers and replace downstream assets so numbers and plots stay aligned with what
 you report.
 
-For **citations and links**, use the **repository or artifact URL** printed in
-the paper itself (e.g. GitHub, Zenodo, or conference supplemental material)—not an
-unpublished private repository.
+**Clone**
 
-**GitHub repository name:** ``PINN-and-Method-of-Steps-Integration-for-the-Mackey-Glass-DDE``.
+.. code-block:: bash
 
-Clone (replace ``<account>`` with the organisation or username that hosts the repo)::
-
-   git clone https://github.com/<account>/PINN-and-Method-of-Steps-Integration-for-the-Mackey-Glass-DDE.git
-
-Experiment scripts and configs for this paper live in the ``synasc/`` subdirectory
-after you clone.
+   git clone https://github.com/ml3m/PINN-and-Method-of-Steps-Integration-for-the-Mackey-Glass-DDE.git
+   cd PINN-and-Method-of-Steps-Integration-for-the-Mackey-Glass-DDE
 
 
 Environment
@@ -72,9 +70,8 @@ Requirements:
 * **PyTorch** must be installed for **your** hardware (CPU, NVIDIA CUDA, or
   AMD ROCm).  See https://pytorch.org/get-started/locally/
 
-Install core dependencies from this directory::
+From the bundle root (directory that contains ``README.rst``)::
 
-   cd synasc
    python -m venv .venv
    source .venv/bin/activate   # Windows: .venv\Scripts\activate
    pip install -U pip
@@ -89,8 +86,6 @@ PyTorch website.  For **AMD ROCm**, follow the comments in
 Quick start (single run)
 ------------------------
 
-From **inside** ``synasc/`` (recommended):
-
 .. code-block:: bash
 
    python -u run_synasc_comparison.py \
@@ -102,11 +97,11 @@ From **inside** ``synasc/`` (recommended):
 
 * Config: ``configs/config_mackey_glass_synasc_t100_windowed.yaml``
 
-* Output: ``results/`` (under this ``synasc`` directory)
+* Output: ``results/`` (under the bundle root)
 
 Relative paths for ``--config`` and ``--output-dir`` are resolved first against
-the current working directory, then against this ``synasc`` bundle—so running
-from ``synasc/`` with paths like ``configs/...`` is the most predictable.
+the current working directory, then against the directory that contains
+``run_synasc_comparison.py``.
 
 **Faster figure export:** add ``--no-pdf`` to skip vector PDF generation (PNG
 only).
@@ -116,11 +111,10 @@ Multi-seed variability
 ----------------------
 
 Orchestrates ``run_synasc_comparison.py`` once per seed and aggregates metrics /
-Plots:
+plots:
 
 .. code-block:: bash
 
-   cd synasc
    HSA_OVERRIDE_GFX_VERSION=10.3.0   # only if your AMD card needs the override
    python -u run_synasc_multi_seed.py \
      --config configs/config_mackey_glass_synasc_t100_windowed.yaml \
@@ -148,9 +142,8 @@ Configurations shipped in ``configs/``
 * ``config_mackey_glass_synasc_smoke_multi_seed.yaml`` — tiny settings for CI /
   smoke tests.
 
-Older copies of some YAMLs may also exist under ``../src/main_programs/configs/``
-when this bundle lives inside a larger checkout; **this** ``synasc/configs/`` tree
-is what readers of the public archive should use for standalone reproduction.
+If you also maintain a larger private checkout, duplicate YAMLs may exist
+elsewhere; use the ``configs/`` directory **next to this README** for reproduction.
 
 
 Outputs
@@ -176,13 +169,13 @@ under version control and regenerate plots locally or in CI.
 Backward compatibility (monorepo checkout)
 ------------------------------------------
 
-If this ``synasc/`` folder sits inside a larger private project, thin wrappers at
-that repository's root may still forward to these scripts::
+If this bundle lives under ``synasc/`` inside a larger repository, thin wrappers at
+that repository's **root** may still forward to these scripts::
 
    python run_synasc_comparison.py
    python run_synasc_multi_seed.py
 
-They execute the implementations in ``synasc/`` with identical behavior.
+They run the copies under ``synasc/`` with the same behavior.
 
 
 License and contact
@@ -191,4 +184,3 @@ License and contact
 Reuse and attribution follow the **license** file distributed with this bundle (if
 present).  For questions about the experiments, use the **contact or author
 information in the published paper** (or its supplement).
-
