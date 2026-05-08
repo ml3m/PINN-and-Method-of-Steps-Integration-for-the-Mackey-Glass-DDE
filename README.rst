@@ -6,11 +6,16 @@ IEEE-style comparison between a **method-of-steps classical DDE solver** and a
 **PyTorch physics-informed neural network (PINN)** on the scalar Mackey–Glass
 equation with fixed delay.
 
-The implementation is described in the companion conference paper; see the
-section **Relation to the paper** below for the path to the ``.tex`` source.
-specifications, and the default **results** tree live **under this folder**, so
-cloning the parent repository and following the steps below is sufficient to
-rerun experiments without hunting paths in ``src/``.
+The implementation is described in the companion conference paper; see
+**Relation to the paper** below for the path to the ``.tex`` source in the
+development tree.
+
+All configuration YAML files, Python drivers, dependency specifications, and the
+default **results** tree live **under this folder**. If you obtained this bundle
+as a **standalone public repository** (or archive) linked from the paper, cloning
+that checkout and following the steps below is enough to rerun experiments.  If you
+keep it nested inside a larger private project, still run commands from this
+``synasc/`` directory so paths resolve correctly.
 
 .. contents:: **Table of contents**
    :local:
@@ -35,7 +40,8 @@ Layout
 Relation to the paper
 ---------------------
 
-In the parent repository, the conference manuscript is maintained at::
+In the full project tree (which may remain private), the conference manuscript is
+maintained at::
 
    BACHELOR_THESIS_MAIN/SYNASC/conference.tex
 
@@ -43,12 +49,11 @@ Figures under ``BACHELOR_THESIS_MAIN/SYNASC/`` (or paths referenced by
 ``\\graphicspath`` in that manuscript) should be regenerated from runs whose
 **YAML** and **hyperparameters** match the values stated in the paper.  After
 code or config changes, rerun the drivers in this folder and replace the
-corresponding assets so the PDF stays consistent with the repository.
+corresponding assets so the PDF stays consistent with the archived code.
 
-If you cite this code publicly, point readers to the **GitHub URL** of the
-parent ``pinn`` repository and to this ``synasc/`` subdirectory as the canonical
-entry point for SYNASC reproduction.
-
+For citations and **public links**, use the **URL printed in the paper** (e.g. a
+standalone ``synasc`` repository, Zenodo archive, or conference supplement)—not an
+unpublished private monorepo.
 
 Environment
 -----------
@@ -138,9 +143,9 @@ Configurations shipped in ``configs/``
 * ``config_mackey_glass_synasc_smoke_multi_seed.yaml`` — tiny settings for CI /
   smoke tests.
 
-Older copies may also exist under ``../src/main_programs/configs/`` in the
-parent repository; **this** ``synasc/configs/`` tree is what the README assumes
-for standalone reproduction.
+Older copies of some YAMLs may also exist under ``../src/main_programs/configs/``
+when this bundle lives inside a larger checkout; **this** ``synasc/configs/`` tree
+is what readers of the public archive should use for standalone reproduction.
 
 
 Outputs
@@ -163,10 +168,11 @@ Each run writes to the directory given by ``--output-dir``.  Typical files:
 under version control and regenerate plots locally or in CI.
 
 
-Backward compatibility (repository root)
------------------------------------------
+Backward compatibility (monorepo checkout)
+------------------------------------------
 
-For existing scripts, the repository root still provides thin wrappers::
+If this ``synasc/`` folder sits inside a larger private project, thin wrappers at
+that repository's root may still forward to these scripts::
 
    python run_synasc_comparison.py
    python run_synasc_multi_seed.py
@@ -177,7 +183,8 @@ They execute the implementations in ``synasc/`` with identical behavior.
 License and contact
 -------------------
 
-Reuse and attribution follow the **license** and **authorship** of the parent
-``pinn`` repository.  For paper-specific queries, refer to the author block in
-``BACHELOR_THESIS_MAIN/SYNASC/conference.tex``.
+Reuse and attribution follow the **license** file distributed with this bundle (if
+present).  For paper-specific queries, refer to the author block in
+``BACHELOR_THESIS_MAIN/SYNASC/conference.tex`` when building from the full
+project tree.
 
