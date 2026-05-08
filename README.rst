@@ -11,11 +11,11 @@ submission** associated with this archive. Cite that publication when you use th
 code or reproduce its tables and figures.
 
 All configuration YAML files, Python drivers, dependency specifications, and the
-default **results** tree live **under this folder**. If you obtained this bundle
-as a **standalone public repository** (or archive) linked from the paper, cloning
-that checkout and following the steps below is enough to rerun experiments.  If you
-keep it nested inside a larger private project, still run commands from this
-``synasc/`` directory so paths resolve correctly.
+default **results** tree live **under this folder**. Clone the public GitHub
+repository **PINN-and-Method-of-Steps-Integration-for-the-Mackey-Glass-DDE**, then
+``cd`` into the directory that contains this ``README.rst`` (in the authors'
+layout that is the ``synasc/`` folder inside the repo).  Run all commands below
+from that directory so relative paths resolve correctly.
 
 .. contents:: **Table of contents**
    :local:
@@ -49,6 +49,17 @@ you report.
 For **citations and links**, use the **repository or artifact URL** printed in
 the paper itself (e.g. GitHub, Zenodo, or conference supplemental material)—not an
 unpublished private repository.
+
+**GitHub repository name:** ``PINN-and-Method-of-Steps-Integration-for-the-Mackey-Glass-DDE``.
+
+Clone (replace ``<account>`` with the organisation or username that hosts the repo)::
+
+   git clone https://github.com/<account>/PINN-and-Method-of-Steps-Integration-for-the-Mackey-Glass-DDE.git
+
+Experiment scripts and configs for this paper live in the ``synasc/`` subdirectory
+after you clone.
+
+
 Environment
 -----------
 
