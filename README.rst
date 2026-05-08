@@ -2,12 +2,7 @@ Mackey–Glass delay equation: classical integrator vs PINN (reproduction)
 =======================================================================
 
 This repository contains code to reproduce the **Mackey–Glass** benchmark from the
-companion **IEEE SYNASC article** (method-of-steps classical solver vs
-physics-informed neural network on a scalar DDE with fixed delay).
-
-Cite that paper when you use this code or regenerate its tables and figures.
-
-**Repository:** https://github.com/ml3m/PINN-and-Method-of-Steps-Integration-for-the-Mackey-Glass-DDE
+companion **IEEE SYNASC paper** (physics-informed neural network vs method-of-steps classical solver on a scalar DDE with fixed delay).
 
 After cloning, use the **repository root** (the directory that contains this
 ``README.rst``) as your working directory for every command below.
