@@ -1,15 +1,18 @@
 Mackey–Glass delay equation: classical integrator vs PINN
 =======================================================================
 
-.. figure:: images/mackey_glass_n10_3d_overlay.png
-   :align: center
-   :width: 100%
-   :alt: 3D delay embedding for Mackey-Glass n=10 — RK4 reference, classical MoS solver, PINN.
+.. raw:: html
 
-   **Mackey–Glass (n = 10).** Three-dimensional delay embedding (state vs two
-   lagged values): fine RK4 reference (grey), classical method-of-steps trajectory
-   (black), PINN prediction (purple). Same style of figure as the long-horizon
-   windowed experiment in the article.
+   <p align="center">
+   <img src="images/mackey_glass_n10_3d_overlay.png"
+        alt="Mackey–Glass n=10: 3D delay embedding — RK4 reference (grey), classical MoS (black), PINN (purple)."
+        width="85%" style="max-width: 880px;">
+   </p>
+
+**Mackey–Glass (n = 10).** Three-dimensional delay embedding (state vs two
+lagged values): fine RK4 reference (grey), classical method-of-steps trajectory
+(black), PINN prediction (purple). Same style of figure as the long-horizon
+windowed experiment in the article.
 
 This repository contains code to reproduce the **Mackey–Glass** benchmark from the
 companion **IEEE SYNASC paper** (physics-informed neural network vs method-of-steps classical solver on a scalar DDE with fixed delay).
