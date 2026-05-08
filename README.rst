@@ -1,54 +1,57 @@
-SYNASC experiments: Mackey–Glass classical vs PINN
-====================================================
+Mackey–Glass delay equation: classical integrator vs PINN (reproduction)
+=======================================================================
 
-This tree is a **self-contained reproducibility bundle** for the SYNASC / IEEE-style
-comparison between a **method-of-steps classical DDE solver** and a **PyTorch
-physics-informed neural network (PINN)** on the scalar Mackey–Glass equation with
-fixed delay.
+This repository contains code to reproduce the **Mackey–Glass** benchmark from the
+companion **IEEE SYNASC article** (method-of-steps classical solver vs
+physics-informed neural network on a scalar DDE with fixed delay).
 
-The method and experimental protocol are described in the companion **SYNASC / IEEE
-submission** associated with this archive. Cite that publication when you use this
-code or reproduce its tables and figures.
+Cite that paper when you use this code or regenerate its tables and figures.
 
-**Canonical public repository:** https://github.com/ml3m/PINN-and-Method-of-Steps-Integration-for-the-Mackey-Glass-DDE
+**Repository:** https://github.com/ml3m/PINN-and-Method-of-Steps-Integration-for-the-Mackey-Glass-DDE
 
-After cloning, your **working directory** should be the folder that contains this
-``README.rst`` and the Python drivers:
-
-* **On GitHub:** repository **root** (scripts and ``configs/`` live next to this file).
-* **Inside a larger private monorepo:** typically the ``synasc/`` subdirectory—use
-  that path the same way.
-
-Run all commands below from that directory.
+After cloning, use the **repository root** (the directory that contains this
+``README.rst``) as your working directory for every command below.
 
 .. contents:: **Table of contents**
    :local:
    :depth: 2
 
 
-Layout
-------
+What is included
+----------------
 
-.. code-block:: text
+**Programs**
 
-   ./
-   ├── README.rst                  ← This file
-   ├── requirements.txt           ← Core Python dependencies
-   ├── requirements-rocm.txt      ← Notes for AMD ROCm / PyTorch ROCm wheels
-   ├── run_synasc_comparison.py   ← Main driver (classical + PINN + figures)
-   ├── run_synasc_multi_seed.py  ← Optional: multi-seed orchestration + plots
-   ├── configs/                   ← Experiment YAML files
-   └── results/                   ← Default output root (artifacts git-ignored)
+* ``run_synasc_comparison.py`` — **Main experiment:** adaptive RK45
+  method-of-steps trajectory, high-accuracy RK4 reference, PINN training with
+  windowed time domains, metrics, and publication-style figures.
+
+* ``run_synasc_multi_seed.py`` — **Optional robustness study:** repeats the main
+  experiment for several pseudorandom seeds and aggregates uncertainty in metrics
+  and learning curves.
+
+**Supporting files**
+
+* ``requirements.txt`` — Python stack including a **CPU** PyTorch build (suitable
+  for reviewers without a CUDA install).
+
+* ``requirements-rocm.txt`` — How to swap in **AMD ROCm** PyTorch after the base
+  install; NVIDIA users should follow `PyTorch Get Started`_ instead.
+
+* ``configs/`` — YAML recipes for horizons, windowing, and training hyperparameters
+  described in the article.
+
+* ``results/`` — Default location for run outputs (large files are git-ignored).
+
+.. _PyTorch Get Started: https://pytorch.org/get-started/locally/
 
 
-Relation to the paper
----------------------
+Matching the published results
+------------------------------
 
-Regenerate figures and metrics with the **YAML files and hyperparameters** that
-match the published article (see the paper text and any supplementary
-hyperparameter tables). After changing code or configs in this bundle, rerun the
-drivers and replace downstream assets so numbers and plots stay aligned with what
-you report.
+Use the **configuration files and hyperparameters** stated in the paper (including
+any supplement). After changing code or YAML, rerun the pipeline and replace
+downstream plots or tables so reported numbers stay consistent.
 
 **Clone**
 
@@ -61,30 +64,24 @@ you report.
 Environment
 -----------
 
-Requirements:
+* **Python** 3.10+ (3.12 tested). Use a **virtual environment**.
 
-* **Python** 3.10 or newer (3.12 is tested).
+* ``requirements.txt`` installs NumPy, SciPy, Matplotlib, PyYAML, and a **CPU**
+  PyTorch wheel (training is slower than on GPU but runs on typical laptops).
 
-* A **virtual environment** is strongly recommended.
+* For **CUDA** or **ROCm** PyTorch, reinstall ``torch`` as in the PyTorch site or
+  ``requirements-rocm.txt``.
 
-* **PyTorch** is installed automatically by ``requirements.txt`` (CPU wheels from
-  PyTorch’s index—works on typical reviewer laptops without an NVIDIA stack).
-  Training is slower on CPU than on a GPU but reproduction runs end-to-end.
-
-* For **NVIDIA CUDA** or **AMD ROCm**, reinstall **torch** afterward — see
-  https://pytorch.org/get-started/locally/ and ``requirements-rocm.txt``.
-
-From the bundle root (directory that contains ``README.rst``)::
+From the repository root::
 
    python -m venv .venv
    source .venv/bin/activate   # Windows: .venv\Scripts\activate
    pip install -U pip
    pip install -r requirements.txt
 
-No separate PyTorch step is required unless you switch to a GPU-specific wheel.
 
-Quick start (single run)
-------------------------
+Single run (main experiment)
+-----------------------------
 
 .. code-block:: bash
 
@@ -97,90 +94,87 @@ Quick start (single run)
 
 * Config: ``configs/config_mackey_glass_synasc_t100_windowed.yaml``
 
-* Output: ``results/`` (under the bundle root)
+* Output directory: ``results/`` under the repository root
 
-Relative paths for ``--config`` and ``--output-dir`` are resolved first against
-the current working directory, then against the directory that contains
-``run_synasc_comparison.py``.
-
-**Faster figure export:** add ``--no-pdf`` to skip vector PDF generation (PNG
-only).
+Config and output paths are resolved against the current working directory, then
+against the directory that contains ``run_synasc_comparison.py``.
 
 
-Multi-seed variability
-----------------------
+Multi-seed run (optional)
+-------------------------
 
-Orchestrates ``run_synasc_comparison.py`` once per seed and aggregates metrics /
-plots:
+Runs the main program once per seed, then builds aggregate CSV/JSON and overlay
+plots.
+
+**AMD ROCm (optional):** some GPUs need a gfx workaround. If required for your
+hardware, set this in the shell **before** the Python command; otherwise omit it::
+
+   export HSA_OVERRIDE_GFX_VERSION=10.3.0
+
+**Run:**
 
 .. code-block:: bash
 
-   HSA_OVERRIDE_GFX_VERSION=10.3.0   # only if your AMD card needs the override
    python -u run_synasc_multi_seed.py \
      --config configs/config_mackey_glass_synasc_t100_windowed.yaml \
      --base-output results/t100_windowed_multi_seed \
      --n-values 10 \
-     --n-seeds 10 --seed-start 1000 \
-     --extra-args '--no-pdf'
+     --n-seeds 10 --seed-start 1000
 
-Use ``--python /path/to/python3`` if the PINN interpreter must differ from the
-one running the orchestrator (e.g. a system Python with ROCm).
-
-
-Configurations shipped in ``configs/``
---------------------------------------
-
-* ``config_mackey_glass_synasc.yaml`` — baseline recipe (see YAML header).
-
-* ``config_mackey_glass_synasc_t20.yaml`` — short horizon.
-
-* ``config_mackey_glass_synasc_t100_windowed.yaml`` — windowed ``[0,100]`` setup
-  used in many SYNASC sweeps.
-
-* ``config_mackey_glass_synasc_t200.yaml`` — longer horizon.
-
-* ``config_mackey_glass_synasc_smoke_multi_seed.yaml`` — tiny settings for CI /
-  smoke tests.
-
-If you also maintain a larger private checkout, duplicate YAMLs may exist
-elsewhere; use the ``configs/`` directory **next to this README** for reproduction.
+Use ``--python /path/to/python3`` if the child jobs must use a different
+interpreter than the orchestrator.
 
 
-Outputs
--------
+Configuration files (``configs/``)
+---------------------------------
 
-Each run writes to the directory given by ``--output-dir``.  Typical files:
+Filenames keep historical tags; each file encodes horizon and training layout:
 
-* ``synasc_results.pkl`` — pickled metrics and trajectories for downstream tables.
+* ``config_mackey_glass_synasc.yaml`` — Baseline setup (see YAML header).
 
-* ``mackey_glass_n*_comparison.png`` — main comparison figure.
+* ``config_mackey_glass_synasc_t20.yaml`` — Short horizon ``[0,20]``.
 
-* ``n*_*.png`` / optional ``.pdf`` — heatmaps, snapshots, 3D embeddings, loss
-  curves, tables.
+* ``config_mackey_glass_synasc_t100_windowed.yaml`` — Windowed ``[0,100]`` as in
+  the article’s long-run Mackey–Glass comparison.
 
-* ``checkpoints_n*/*.pt`` — per-window PINN checkpoints (resume on rerun).
+* ``config_mackey_glass_synasc_t200.yaml`` — Horizon ``[0,200]``.
+
+* ``config_mackey_glass_synasc_smoke_multi_seed.yaml`` — Minimal settings for
+  quick CI or smoke tests.
+
+Use the ``configs/`` directory **in this repository** when reproducing the paper.
 
 
-**Git:** generated artifacts under ``results/`` are ignored by default via
-``results/.gitignore`` so pull requests stay small; keep YAML + code changes
-under version control and regenerate plots locally or in CI.
+Run outputs
+-----------
+
+Each run writes under ``--output-dir``:
+
+* ``synasc_results.pkl`` — Serialized trajectories, metrics, and metadata for
+  tables or follow-on scripts.
+
+* ``mackey_glass_n*_comparison.png`` — Primary side-by-side comparison figure.
+
+* ``n*_*.png`` / ``.pdf`` — Heatmaps, time slices, embeddings, losses, tables.
+
+* ``checkpoints_n*/*.pt`` — PINN checkpoints per time window (runs resume if
+  these exist).
+
+Generated content under ``results/`` is excluded from git by default
+(``results/.gitignore``).
 
 
-Backward compatibility (monorepo checkout)
-------------------------------------------
+Thin wrappers in larger projects
+---------------------------------
 
-If this bundle lives under ``synasc/`` inside a larger repository, thin wrappers at
-that repository's **root** may still forward to these scripts::
-
-   python run_synasc_comparison.py
-   python run_synasc_multi_seed.py
-
-They run the copies under ``synasc/`` with the same behavior.
+If another repository vendors these scripts behind small launcher files at its
+**root**, prefer executing **this** directory’s ``run_synasc_comparison.py`` and
+``run_synasc_multi_seed.py`` directly so paths and configs stay unambiguous.
 
 
 License and contact
 -------------------
 
-Reuse and attribution follow the **license** file distributed with this bundle (if
-present).  For questions about the experiments, use the **contact or author
-information in the published paper** (or its supplement).
+Reuse and attribution follow the **LICENSE** file shipped here, if present.
+Questions about the **Mackey–Glass experiments** should go to the authors via the
+published paper or its supplement.
