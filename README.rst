@@ -6,7 +6,7 @@ Mackey–Glass delay equation: classical integrator vs PINN
    <p align="center">
    <img src="images/mackey_glass_n10_3d_overlay.png"
         alt="Mackey–Glass n=10: 3D delay embedding — RK4 reference (grey), classical MoS (black), PINN (purple)."
-        width="85%" style="max-width: 880px;">
+        width="35%" style="max-width: 880px;">
    </p>
 
 **Mackey–Glass (n = 10).** Three-dimensional delay embedding (state vs two
