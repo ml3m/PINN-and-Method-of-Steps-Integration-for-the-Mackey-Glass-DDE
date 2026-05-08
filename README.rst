@@ -6,9 +6,9 @@ IEEE-style comparison between a **method-of-steps classical DDE solver** and a
 **PyTorch physics-informed neural network (PINN)** on the scalar Mackey–Glass
 equation with fixed delay.
 
-The implementation is described in the companion conference paper; see
-**Relation to the paper** below for the path to the ``.tex`` source in the
-development tree.
+The method and experimental protocol are described in the companion **SYNASC / IEEE
+submission** associated with this archive. Cite that publication when you use this
+code or reproduce its tables and figures.
 
 All configuration YAML files, Python drivers, dependency specifications, and the
 default **results** tree live **under this folder**. If you obtained this bundle
@@ -40,21 +40,15 @@ Layout
 Relation to the paper
 ---------------------
 
-In the full project tree (which may remain private), the conference manuscript is
-maintained at::
+Regenerate figures and metrics with the **YAML files and hyperparameters** that
+match the published article (see the paper text and any supplementary
+hyperparameter tables). After changing code or configs in this bundle, rerun the
+drivers and replace downstream assets so numbers and plots stay aligned with what
+you report.
 
-   BACHELOR_THESIS_MAIN/SYNASC/conference.tex
-
-Figures under ``BACHELOR_THESIS_MAIN/SYNASC/`` (or paths referenced by
-``\\graphicspath`` in that manuscript) should be regenerated from runs whose
-**YAML** and **hyperparameters** match the values stated in the paper.  After
-code or config changes, rerun the drivers in this folder and replace the
-corresponding assets so the PDF stays consistent with the archived code.
-
-For citations and **public links**, use the **URL printed in the paper** (e.g. a
-standalone ``synasc`` repository, Zenodo archive, or conference supplement)—not an
-unpublished private monorepo.
-
+For **citations and links**, use the **repository or artifact URL** printed in
+the paper itself (e.g. GitHub, Zenodo, or conference supplemental material)—not an
+unpublished private repository.
 Environment
 -----------
 
@@ -184,7 +178,6 @@ License and contact
 -------------------
 
 Reuse and attribution follow the **license** file distributed with this bundle (if
-present).  For paper-specific queries, refer to the author block in
-``BACHELOR_THESIS_MAIN/SYNASC/conference.tex`` when building from the full
-project tree.
+present).  For questions about the experiments, use the **contact or author
+information in the published paper** (or its supplement).
 
