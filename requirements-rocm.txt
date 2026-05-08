@@ -1,0 +1,13 @@
+# Optional: AMD GPUs (ROCm). Use after requirements.txt.
+#
+# PyTorch wheels are not on PyPI for ROCm; install a second step so NumPy/SciPy
+# still resolve from PyPI:
+#
+#   pip install -r requirements.txt
+#   pip install torch --index-url https://download.pytorch.org/whl/rocm6.3
+#
+# Match rocm6.2 / rocm6.3 / rocm6.4 (or nightly) to your driver stack:
+#   https://pytorch.org/get-started/locally/
+#
+# Some unsupported consumer cards (e.g. gfx1032) may need:
+#   export HSA_OVERRIDE_GFX_VERSION=10.3.0

@@ -1,0 +1,10 @@
+# SYNASC Mackey–Glass comparison (run_synasc_comparison.py)
+# Python 3.10+ recommended.
+#
+# Install PyTorch for your platform from https://pytorch.org before or after this file.
+# Example (CPU only):  pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+numpy>=1.24,<3
+scipy>=1.11
+matplotlib>=3.7
+PyYAML>=6.0

@@ -1,0 +1,3 @@
+# Large experiment outputs — keep the directory in the repository tree, not the blobs.
+*
+!.gitignore

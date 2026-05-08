@@ -1,0 +1,137 @@
+problem:
+  name: mackey_glass_equation
+  description: Mackey-Glass DDE for SYNASC paper — long horizon [0,200]
+  beta_true: 2.0
+  gamma_true: 1.0
+  n: 10.0
+  tau: 2.0
+  time_span:
+  - 0.0
+  - 200.0
+  initial_x_history: 1.2
+
+data:
+  dt: 0.1
+  t_total: 200.0
+  training:
+    n_points: 2000
+    noise_level: 0.0
+  test:
+    n_points: 2000
+    noise_level: 0.0
+
+network:
+  layers:
+  - 1
+  - 128
+  - 128
+  - 128
+  - 128
+  - 128
+  - 128
+  - 1
+  activation: sine
+  initialization: siren
+  fourier_features: true
+  fourier_dim: 64
+  fourier_scale: 5.0
+
+optimizer_comparison:
+  architectures:
+  - baseline
+  optimizers:
+    first_order:
+    - type: Adam
+      learning_rate: 0.001
+      name: Adam (lr=0.001)
+      order: first
+  early_stopping:
+    enable: false
+    first_order:
+      patience: 200
+      min_delta: 1.0e-07
+      check_interval: 100
+    second_order:
+      patience: 20
+      min_delta: 1.0e-07
+  scipy_options:
+    ftol: 1.0e-13
+    gtol: 1.0e-09
+  convergence:
+    threshold: 1.0e-06
+    window: 20
+  visualization:
+    test_points: 5000
+    smoothing:
+      kernel_size: 31
+      adaptive: true
+    plot_settings:
+      figsize:
+      - 20
+      - 14
+      hspace: 0.4
+      wspace: 0.4
+      dpi: 300
+
+training:
+  optimizer:
+    type: Adam
+    learning_rate: 0.001
+    beta1: 0.9
+    beta2: 0.999
+    epsilon: 1e-8
+    momentum: 0.0
+    nesterov: false
+    weight_decay: 0.0
+    clip_norm: 1.0
+  loss_weights:
+    data_loss: 50.0
+    physics_loss: 1.0
+    history_loss: 10.0
+    ic_loss: 50.0
+  n_collocation: 5000
+  physics_ramp_iters: 1000
+  curriculum: true
+  adaptive_sampling: false
+  resample_every: 300
+  window_size: 200.0
+  window_overlap: 0.0
+  n_lbfgs: 500
+  ema_decay: 0.999
+  loss_components:
+    enable_history: true
+    history_samples: 50
+  iterations:
+    main: 15000
+  log_interval: 500
+  random_seed: 1234
+  tensorflow_seed: 1234
+  lr_schedule:
+    type: cosine
+    warmup_steps: 500
+    boundaries: []
+    values: []
+
+model:
+  learn_beta: true
+  learn_gamma: true
+  learn_tau: false
+  learn_n: true
+  beta_init_log: -1.609437912
+  gamma_init_log: -2.302585093
+  tau_init_log: 2.833213344056216
+  n_init_log: 2.302585093
+
+advanced:
+  tensorflow:
+    allow_soft_placement: true
+    log_device_placement: false
+  memory:
+    allow_growth: true
+  precision:
+    dtype: float32
+    gradient_clipping: null
+
+visualization:
+  phase_space:
+    horizontal_scale: 4.0
