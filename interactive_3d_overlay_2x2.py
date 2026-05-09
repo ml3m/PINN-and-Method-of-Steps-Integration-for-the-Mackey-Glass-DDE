@@ -144,8 +144,8 @@ def main() -> None:
         )
 
     fig.suptitle(
-        f"Mackey-Glass ($n={float(v_args.n):g}$) — 3D delay embedding — press **s** to save",
-        fontsize=11,
+        f"Mackey-Glass ($n={float(v_args.n):g}$) — 3D delay embedding overlays",
+        fontsize=12,
         fontweight="bold",
         y=0.995,
     )
