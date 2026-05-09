@@ -1,8 +1,8 @@
-# Minimal SYNASC wiring for smoke-testing run_synasc_multi_seed (10 seeds).
+# Minimal wiring for smoke-testing run_mglass_multi_seed (10 seeds).
 # Short horizon => one PINN window; tiny Adam/L-BFGS counts; sparse collocation.
 problem:
   name: mackey_glass_equation
-  description: Mackey-Glass DDE SYNASC smoke test [0, 25] single-window
+  description: Mackey-Glass DDE smoke test [0, 25] single-window
   beta_true: 2.0
   gamma_true: 1.0
   n: 10.0

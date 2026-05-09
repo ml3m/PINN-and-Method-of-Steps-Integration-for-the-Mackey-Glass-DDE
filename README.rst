@@ -15,7 +15,7 @@ lagged values): fine RK4 reference (grey), classical method-of-steps trajectory
 windowed experiment in the article.
 
 This repository contains code to reproduce the **Mackey–Glass** benchmark from the
-companion **IEEE SYNASC paper** (physics-informed neural network vs method-of-steps classical solver on a scalar DDE with fixed delay).
+companion **IEEE conference paper** (physics-informed neural network vs method-of-steps classical solver on a scalar DDE with fixed delay).
 
 **Repository:** https://github.com/ml3m/PINN-and-Method-of-Steps-Integration-for-the-Mackey-Glass-DDE
 
@@ -32,11 +32,11 @@ What is included
 
 **Programs**
 
-* ``run_synasc_comparison.py`` — **Main experiment:** adaptive RK45
+* ``run_mglass_comparison.py`` — **Main experiment:** adaptive RK45
   method-of-steps trajectory, high-accuracy RK4 reference, PINN training with
   windowed time domains, metrics, and figures.
 
-* ``run_synasc_multi_seed.py`` — **Optional robustness study:** repeats the main
+* ``run_mglass_multi_seed.py`` — **Optional robustness study:** repeats the main
   experiment for several pseudorandom seeds and aggregates uncertainty in metrics
   and learning curves.
 
@@ -97,19 +97,19 @@ Single run (main experiment)
 
 .. code-block:: bash
 
-   python -u run_synasc_comparison.py \
-     --config configs/config_mackey_glass_synasc_t100_windowed.yaml \
+   python -u run_mglass_comparison.py \
+     --config configs/config_mackey_glass_t200_windowed.yaml \
      --n-values 10 \
-     --output-dir results/t100_windowed_n10
+     --output-dir results/t200_windowed_n10
 
 **Defaults** if you omit ``--config`` / ``--output-dir``:
 
-* Config: ``configs/config_mackey_glass_synasc_t100_windowed.yaml``
+* Config: ``configs/config_mackey_glass_t200_windowed.yaml``
 
 * Output directory: ``results/`` under the repository root
 
 Config and output paths are resolved against the current working directory, then
-against the directory that contains ``run_synasc_comparison.py``.
+against the directory that contains ``run_mglass_comparison.py``.
 
 
 Multi-seed run (optional)
@@ -127,8 +127,8 @@ hardware, set this in the shell **before** the Python command; otherwise omit it
 
 .. code-block:: bash
 
-   python -u run_synasc_multi_seed.py \
-     --config configs/config_mackey_glass_synasc_t100_windowed.yaml \
+   python -u run_mglass_multi_seed.py \
+     --config configs/config_mackey_glass_t100_windowed.yaml \
      --base-output results/t100_windowed_multi_seed \
      --n-values 10 \
      --n-seeds 10 --seed-start 1000
@@ -142,16 +142,17 @@ Configuration files (``configs/``)
 
 Filenames keep historical tags; each file encodes horizon and training layout:
 
-* ``config_mackey_glass_synasc.yaml`` — Baseline setup (see YAML header).
+* ``config_mackey_glass.yaml`` — Baseline setup (see YAML header).
 
-* ``config_mackey_glass_synasc_t20.yaml`` — Short horizon ``[0,20]``.
+* ``config_mackey_glass_t20.yaml`` — Short horizon ``[0,20]``.
 
-* ``config_mackey_glass_synasc_t100_windowed.yaml`` — Windowed ``[0,100]`` as in
-  the article’s long-run Mackey–Glass comparison.
+* ``config_mackey_glass_t200.yaml`` — Single-window horizon ``[0,200]``.
 
-* ``config_mackey_glass_synasc_t200.yaml`` — Horizon ``[0,200]``.
+* ``config_mackey_glass_t200_windowed.yaml`` — Windowed ``[0,200]`` (figures in the IEEE paper).
 
-* ``config_mackey_glass_synasc_smoke_multi_seed.yaml`` — Minimal settings for
+* ``config_mackey_glass_t100_windowed.yaml`` — Windowed ``[0,100]`` (shorter benchmark).
+
+* ``config_mackey_glass_smoke_multi_seed.yaml`` — Minimal settings for
   quick CI or smoke tests.
 
 Use the ``configs/`` directory **in this repository** when reproducing the paper.
@@ -162,7 +163,7 @@ Run outputs
 
 Each run writes under ``--output-dir``:
 
-* ``synasc_results.pkl`` — Serialized trajectories, metrics, and metadata for
+* ``mglass_run.pkl`` — Serialized trajectories, metrics, and metadata for
   tables or follow-on scripts.
 
 * ``mackey_glass_n*_comparison.png`` — Primary side-by-side comparison figure.

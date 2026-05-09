@@ -2,18 +2,18 @@
 """
 Interactive 2×2 3D delay-embedding overlay (RK4 + MoS + PINN).
 
-Uses a GUI backend (default TkAgg). Import run_synasc_comparison only after
-SYNASC_MPL_INTERACTIVE is set so matplotlib is not forced to Agg.
+Uses a GUI backend (default TkAgg). Import run_mglass_comparison only after
+MGLASS_MPL_INTERACTIVE is set so matplotlib is not forced to Agg.
 
-  cd synasc && SYNASC_MPL_INTERACTIVE=1 python interactive_3d_overlay_2x2.py \\
-      --pkl ../SYNASC_results_t200_windowed/synasc_results.pkl --n 10
+  cd mglass_comparison && MGLASS_MPL_INTERACTIVE=1 python interactive_3d_overlay_2x2.py \\
+      --pkl ../mglass_results_t200_windowed/mglass_run.pkl --n 10
 
 Rotate / zoom each subplot with the mouse (standard mpl3d toolbar). When the
 framing looks right, focus the figure window and press **s** to write PDF and PNG.
 
 Qt backend (if Tk is unavailable)::
 
-  MPLBACKEND=QtAgg SYNASC_MPL_INTERACTIVE=1 python interactive_3d_overlay_2x2.py ...
+  MPLBACKEND=QtAgg MGLASS_MPL_INTERACTIVE=1 python interactive_3d_overlay_2x2.py ...
 """
 from __future__ import annotations
 
@@ -23,13 +23,13 @@ import argparse
 import pickle
 from pathlib import Path
 
-os.environ.setdefault("SYNASC_MPL_INTERACTIVE", "1")
+os.environ.setdefault("MGLASS_MPL_INTERACTIVE", "1")
 
 import numpy as np
 
-# Must run after SYNASC_MPL_INTERACTIVE (see run_synasc_comparison).
-from run_synasc_comparison import (  # noqa: E402
-    SYNASC_ROOT,
+# Must run after MGLASS_MPL_INTERACTIVE (see run_mglass_comparison).
+from run_mglass_comparison import (  # noqa: E402
+    MGLASS_COMPARISON_ROOT,
     _OVERLAY_3D_VIEW_QUAD,
     _delay_indices,
     _f_bounds_xyz_from_branches,
@@ -55,8 +55,8 @@ def main() -> None:
     v_ap.add_argument(
         "--pkl",
         type=Path,
-        default=SYNASC_ROOT.parent / "SYNASC_results_t200_windowed" / "synasc_results.pkl",
-        help="synasc_results.pkl",
+        default=MGLASS_COMPARISON_ROOT.parent / "mglass_results_t200_windowed" / "mglass_run.pkl",
+        help="mglass_run.pkl",
     )
     v_ap.add_argument("--n", type=float, default=10.0)
     v_ap.add_argument(

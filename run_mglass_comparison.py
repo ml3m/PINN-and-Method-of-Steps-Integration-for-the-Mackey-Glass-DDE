@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SYNASC Paper: Classical DDE Solver vs PINN for Mackey-Glass Equation.
+Mackey-Glass PINN comparison: Classical DDE Solver vs PINN for Mackey-Glass Equation.
 
 PyTorch PINN with ROCm GPU acceleration (AMD RX 6700S / gfx1032).
 
@@ -10,30 +10,31 @@ Produces KdV-style comparison figures:
   - Quantitative comparison table (MSE, relative discrete l^2_N on grid, wall time)
   - Delay-coordinate embedding visualizations
 
-Usage (from the ``synasc/`` directory, or with absolute paths):
+Usage (from the ``mglass_comparison/`` directory, or with absolute paths):
 
-    python run_synasc_comparison.py \\
-        [--config configs/config_mackey_glass_synasc_t100_windowed.yaml] \\
+    python run_mglass_comparison.py \\
+        [--config configs/config_mackey_glass_t200_windowed.yaml] \\
         [--n-values 10] [--output-dir results/my_run]
 
-YAML recipes live in ``synasc/configs/``. By default, figures and ``synasc_results.pkl``
-are written under ``synasc/results/`` (see ``--output-dir``).
+YAML recipes live in ``mglass_comparison/configs/``. By default, figures and ``mglass_run.pkl``
+are written under ``mglass_comparison/results/`` (see ``--output-dir``).
 
-    The ``config_mackey_glass_synasc.yaml`` file keeps a shorter ``[0,100]``
-    single-window setup; ``config_mackey_glass_synasc_t100_windowed.yaml`` is
-    the windowed recipe on ``[0,100]`` (horizon matches ``data.t_total`` /
-    ``problem.time_span``) with ``L=25``, ``O=5``.
+    The ``config_mackey_glass.yaml`` file keeps a shorter ``[0,100]``
+    single-window setup; ``config_mackey_glass_t200_windowed.yaml`` is
+    the windowed recipe on ``[0,200]`` used for the IEEE paper figures,
+    with ``L=25``, ``O=5``.
+    ``config_mackey_glass_t100_windowed.yaml`` is the shorter ``[0,100]`` windowed benchmark.
     Window construction is in ``f_build_time_windows``.
 
 Re-export the 3D overlay (four POVs + ``*_2x2.png`` grid) from a finished run::
 
-    python run_synasc_comparison.py --only-3d-overlay \\
+    python run_mglass_comparison.py --only-3d-overlay \\
         --output-dir results/my_run --n-values 10
 
 Writes ``n10_3d_overlay.png``, ``n10_3d_overlay_pov_*.png`` for the other cameras,
 and ``n10_3d_overlay_2x2.png`` (PDFs too unless ``--no-pdf``).
 
-``synasc_results.pkl`` must exist under ``--output-dir`` unless you pass ``--from-pkl``.
+``mglass_run.pkl`` must exist under ``--output-dir`` unless you pass ``--from-pkl``.
 """
 
 import os
@@ -72,8 +73,8 @@ except ImportError as _e:
     ) from _e
 
 import matplotlib
-# Batch jobs: Agg (default). Interactive tools: set SYNASC_MPL_INTERACTIVE=1 before import.
-if os.environ.get("SYNASC_MPL_INTERACTIVE", "").lower() in ("1", "true", "yes"):
+# Batch jobs: Agg (default). Interactive tools: set MGLASS_MPL_INTERACTIVE=1 before import.
+if os.environ.get("MGLASS_MPL_INTERACTIVE", "").lower() in ("1", "true", "yes"):
     matplotlib.use(os.environ.get("MPLBACKEND", "TkAgg"), force=True)
 else:
     matplotlib.use("Agg")
@@ -81,30 +82,30 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import matplotlib.ticker as ticker
 
-# Root of the SYNASC reproducibility bundle (this directory).
-SYNASC_ROOT = Path(__file__).resolve().parent
+# Root of the Reproducibility bundle (this directory).
+MGLASS_COMPARISON_ROOT = Path(__file__).resolve().parent
 
 # If False (see ``--no-pdf``), skip PDF export — ``bbox_inches="tight"`` PDFs are slow.
-_SYNASC_SAVE_PDF = True
+_MGLASS_SAVE_PDF = True
 
 
-def f_resolve_synasc_config_path(raw: str) -> str:
-    """Resolve YAML path: CWD, then ``synasc/`` bundle (``SYNASC_ROOT``)."""
+def f_resolve_bundle_config_path(raw: str) -> str:
+    """Resolve YAML path: CWD, then ``mglass_comparison/`` bundle (``MGLASS_COMPARISON_ROOT``)."""
     p = Path(raw).expanduser()
     if p.is_file():
         return str(p.resolve())
-    alt = SYNASC_ROOT / raw
+    alt = MGLASS_COMPARISON_ROOT / raw
     if alt.is_file():
         return str(alt.resolve())
     return str(p.resolve())
 
 
-def f_resolve_synasc_output_dir(raw: str) -> str:
-    """Place relative output paths under ``synasc/`` unless absolute."""
+def f_resolve_bundle_output_dir(raw: str) -> str:
+    """Place relative output paths under ``mglass_comparison/`` unless absolute."""
     p = Path(raw).expanduser()
     if p.is_absolute():
         return str(p.resolve())
-    return str((SYNASC_ROOT / p).resolve())
+    return str((MGLASS_COMPARISON_ROOT / p).resolve())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -496,7 +497,7 @@ def f_build_time_windows(
     Windows have length at most ``p_win_size`` and advance by
     ``p_win_size - p_win_overlap`` until the right endpoint reaches
     ``p_t_end``. For example, with ``p_t_end = 200``, ``p_win_size = 25``,
-    ``p_win_overlap = 5`` (SYNASC default) this yields 10 windows:
+    ``p_win_overlap = 5`` (default) this yields 10 windows:
     ``[0, 25], [20, 45], [40, 65], [60, 85], [80, 105], [100, 125],
     [120, 145], [140, 165], [160, 185], [180, 200]``.
 
@@ -756,7 +757,7 @@ def f_train_pinn_mackey_glass(
 
     # Checkpoint directory
     v_ckpt_dir = os.path.join(
-        d_config.get("_output_dir", "SYNASC_results"),
+        d_config.get("_output_dir", "mglass_results"),
         f"checkpoints_n{p_n_value:g}",
     )
     os.makedirs(v_ckpt_dir, exist_ok=True)
@@ -918,7 +919,7 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection
 def _save(fig, path):
     """Save figure as PNG and optionally PDF, then close."""
     fig.savefig(path, dpi=300, bbox_inches="tight")
-    if _SYNASC_SAVE_PDF:
+    if _MGLASS_SAVE_PDF:
         fig.savefig(path.replace(".png", ".pdf"), bbox_inches="tight")
     plt.close(fig)
     print(f"    -> {path}")
@@ -1726,7 +1727,7 @@ def f_export_pointwise_error(
 
 # ─────── Raissi-style combined figure ───────
 
-def f_create_synasc_figure(
+def f_create_mglass_figure(
     p_t_ref, p_x_ref, p_t_pinn_test, p_x_pinn,
     p_t_train, p_x_train,
     p_params_true, p_params_pinn,
@@ -2043,11 +2044,11 @@ def f_load_config(p_path: str) -> Dict[str, Any]:
 
 
 def f_parse_args():
-    v_parser = argparse.ArgumentParser(description="SYNASC comparison: Classical DDE vs PINN")
+    v_parser = argparse.ArgumentParser(description="Mackey-Glass DDE comparison: Classical DDE vs PINN")
     v_parser.add_argument(
         "--config",
-        default=str(SYNASC_ROOT / "configs" / "config_mackey_glass_synasc_t100_windowed.yaml"),
-        help="PINN config YAML (relative paths resolve under this synasc bundle)",
+        default=str(MGLASS_COMPARISON_ROOT / "configs" / "config_mackey_glass_t200_windowed.yaml"),
+        help="PINN config YAML (relative paths resolve under this reproducibility bundle)",
     )
     v_parser.add_argument(
         "--n-values",
@@ -2056,8 +2057,8 @@ def f_parse_args():
     )
     v_parser.add_argument(
         "--output-dir",
-        default=str(SYNASC_ROOT / "results"),
-        help="Output directory for figures and data (relative paths are under synasc/)",
+        default=str(MGLASS_COMPARISON_ROOT / "results"),
+        help="Output directory for figures and data (relative paths are under mglass_comparison/)",
     )
     v_parser.add_argument(
         "--skip-pinn",
@@ -2111,13 +2112,13 @@ def f_parse_args():
     v_parser.add_argument(
         "--only-3d-overlay",
         action="store_true",
-        help="Load synasc_results.pkl and regenerate n*_3d_overlay.{png,pdf} only "
+        help="Load mglass_run.pkl and regenerate n*_3d_overlay.{png,pdf} only "
              "(no classical solve, no reference RK4, no PINN).",
     )
     v_parser.add_argument(
         "--from-pkl",
         default=None,
-        help="Pickle path for --only-3d-overlay (default: OUTPUT_DIR/synasc_results.pkl).",
+        help="Pickle path for --only-3d-overlay (default: OUTPUT_DIR/mglass_run.pkl).",
     )
     return v_parser.parse_args()
 
@@ -2136,15 +2137,15 @@ def _f_result_key_for_n(p_results: dict, p_n: float):
 
 
 def main():
-    global _SYNASC_SAVE_PDF
+    global _MGLASS_SAVE_PDF
     v_args = f_parse_args()
-    _SYNASC_SAVE_PDF = not v_args.no_pdf
+    _MGLASS_SAVE_PDF = not v_args.no_pdf
 
-    v_args.output_dir = f_resolve_synasc_output_dir(v_args.output_dir)
+    v_args.output_dir = f_resolve_bundle_output_dir(v_args.output_dir)
 
     if v_args.only_3d_overlay:
         os.makedirs(v_args.output_dir, exist_ok=True)
-        v_pkl = v_args.from_pkl or os.path.join(v_args.output_dir, "synasc_results.pkl")
+        v_pkl = v_args.from_pkl or os.path.join(v_args.output_dir, "mglass_run.pkl")
         if not os.path.isfile(v_pkl):
             raise SystemExit(f"--only-3d-overlay: pickle not found: {v_pkl}")
         with open(v_pkl, "rb") as fh:
@@ -2180,7 +2181,7 @@ def main():
         print(f"\nDone. Overlay(s) written under {v_args.output_dir}/")
         return
 
-    v_args.config = f_resolve_synasc_config_path(v_args.config)
+    v_args.config = f_resolve_bundle_config_path(v_args.config)
 
     l_n_values = [float(x.strip()) for x in v_args.n_values.split(",")]
     os.makedirs(v_args.output_dir, exist_ok=True)
@@ -2209,7 +2210,7 @@ def main():
     d_all_results = {}
 
     print("=" * 80)
-    print("SYNASC COMPARISON: Classical DDE Solver vs PINN (Mackey-Glass)")
+    print("MACKEY-GLASS COMPARISON: Classical DDE Solver vs PINN (Mackey-Glass)")
     print("=" * 80)
     print(f"  beta={v_beta}, gamma={v_gamma}, tau={v_tau}, x0={v_x0}")
     print(f"  t_end={v_t_end}, dt_fine={v_dt_fine}")
@@ -2321,7 +2322,7 @@ def main():
         # Per-n figure
         if d_pinn_result is not None:
             v_fig_path = os.path.join(v_args.output_dir, f"mackey_glass_n{v_n:g}_comparison.png")
-            f_create_synasc_figure(
+            f_create_mglass_figure(
                 p_t_ref=v_t_ref,
                 p_x_ref=v_x_ref,
                 p_t_pinn_test=d_pinn_result["t_test"],
@@ -2362,7 +2363,7 @@ def main():
     )
 
     # Save raw results
-    v_pkl_path = os.path.join(v_args.output_dir, "synasc_results.pkl")
+    v_pkl_path = os.path.join(v_args.output_dir, "mglass_run.pkl")
     with open(v_pkl_path, "wb") as fh:
         pickle.dump(d_all_results, fh, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"\nRaw results saved to: {v_pkl_path}")
@@ -2408,7 +2409,7 @@ def f_generate_n_sweep_3d_grid(
     p_x0: float = 1.2,
     p_t_end: float = 100.0,
     p_dt: float = 0.01,
-    p_output_dir: str = "SYNASC_results",
+    p_output_dir: str = "mglass_results",
     p_pinn_checkpoint_dir: Optional[str] = None,
     p_pinn_config: Optional[Dict[str, Any]] = None,
 ):

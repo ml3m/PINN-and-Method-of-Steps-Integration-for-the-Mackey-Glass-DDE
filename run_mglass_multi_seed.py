@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Run run_synasc_comparison.py for several random seeds, aggregate metrics,
+Run run_mglass_comparison.py for several random seeds, aggregate metrics,
 and plot variability (PINN training stochasticity).
 
 Each seed writes to:  <base-dir>/seed_<seed>/
@@ -15,8 +15,8 @@ After all runs succeed:
   - multi_seed_learning_curves.png  (mean ± std ribbon over training steps; total / data / physics loss)
 
 Example:
-  HSA_OVERRIDE_GFX_VERSION=10.3.0 python3 run_synasc_multi_seed.py \\
-    --config configs/config_mackey_glass_synasc_t20.yaml \\
+  HSA_OVERRIDE_GFX_VERSION=10.3.0 python3 run_mglass_multi_seed.py \\
+    --config configs/config_mackey_glass_t20.yaml \\
     --base-output results/multi_seed_t20 \\
     --n-values 10 \\
     --n-seeds 10 --seed-start 1000
@@ -26,7 +26,7 @@ ROCm / venv: default --python is the interpreter running this script. A TensorFl
 ``requirements-rocm.txt`` for AMD GPUs), or pass ``--python`` to a ``python3`` that has PyTorch.
 
 Or explicit seeds:
-  python3 run_synasc_multi_seed.py --seeds 42,123,456,789,1024,2024,3141,5555,9999,12345
+  python3 run_mglass_multi_seed.py --seeds 42,123,456,789,1024,2024,3141,5555,9999,12345
 """
 
 from __future__ import annotations
@@ -43,14 +43,14 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-SYNASC_ROOT = Path(__file__).resolve().parent
+MGLASS_COMPARISON_ROOT = Path(__file__).resolve().parent
 
 
 def f_resolve_seed_config(p: Path) -> Path:
     p = Path(p).expanduser()
     if p.is_file():
         return p.resolve()
-    alt = SYNASC_ROOT / p
+    alt = MGLASS_COMPARISON_ROOT / p
     if alt.is_file():
         return alt.resolve()
     return p.resolve()
@@ -60,7 +60,7 @@ def f_resolve_seed_base_output(p: Path) -> Path:
     p = Path(p).expanduser()
     if p.is_absolute():
         return p.resolve()
-    return (SYNASC_ROOT / p).resolve()
+    return (MGLASS_COMPARISON_ROOT / p).resolve()
 
 
 def f_resolve_plot_n(
@@ -78,24 +78,24 @@ def f_resolve_plot_n(
 
 
 def f_parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Multi-seed SYNASC PINN runs + aggregation")
+    p = argparse.ArgumentParser(description="Multi-seed PINN runs + aggregation")
     p.add_argument(
         "--config",
         type=Path,
-        default=SYNASC_ROOT / "configs" / "config_mackey_glass_synasc.yaml",
-        help="YAML passed to run_synasc_comparison.py",
+        default=MGLASS_COMPARISON_ROOT / "configs" / "config_mackey_glass.yaml",
+        help="YAML passed to run_mglass_comparison.py",
     )
     p.add_argument(
         "--base-output",
         type=Path,
-        default=SYNASC_ROOT / "results" / "multi_seed",
+        default=MGLASS_COMPARISON_ROOT / "results" / "multi_seed",
         help="Parent directory; each seed uses base-output/seed_<id>/",
     )
     p.add_argument("--n-values", default="10", help="Comma-separated n (Hill exponents)")
     p.add_argument(
         "--extra-args",
         default="",
-        help='Extra args for run_synasc_comparison.py, e.g. \'--skip-pinn\' (quoted)',
+        help='Extra args for run_mglass_comparison.py, e.g. \'--skip-pinn\' (quoted)',
     )
     p.add_argument(
         "--seeds",
@@ -160,7 +160,7 @@ def f_run_one(
     cmd = [
         py,
         "-u",
-        str(SYNASC_ROOT / "run_synasc_comparison.py"),
+        str(MGLASS_COMPARISON_ROOT / "run_mglass_comparison.py"),
         "--config",
         str(config),
         "--n-values",
@@ -176,7 +176,7 @@ def f_run_one(
     print("\n" + "=" * 72)
     print("RUN:", " ".join(cmd))
     print("=" * 72 + "\n", flush=True)
-    r = subprocess.run(cmd, cwd=str(SYNASC_ROOT), env=env)
+    r = subprocess.run(cmd, cwd=str(MGLASS_COMPARISON_ROOT), env=env)
     return int(r.returncode)
 
 
@@ -195,7 +195,7 @@ def f_pick_row_for_n(data: Dict[Any, Any], v_n_target: Optional[float]) -> Optio
 
 
 def f_load_pickle_rows(seed_dir: Path) -> List[Dict[str, Any]]:
-    pkl = seed_dir / "synasc_results.pkl"
+    pkl = seed_dir / "mglass_run.pkl"
     if not pkl.is_file():
         return []
     with open(pkl, "rb") as fh:
@@ -343,7 +343,7 @@ def f_plot_overlay_timeseries(v_base: Path, v_n_target: Optional[float], fname: 
     for d in sorted(v_base.iterdir()):
         if not d.is_dir() or not d.name.startswith("seed_"):
             continue
-        pkl = d / "synasc_results.pkl"
+        pkl = d / "mglass_run.pkl"
         if not pkl.is_file():
             continue
         with open(pkl, "rb") as fh:
@@ -413,7 +413,7 @@ def f_plot_overlay_abs_error(v_base: Path, v_n_target: Optional[float], fname: s
     for d in sorted(v_base.iterdir()):
         if not d.is_dir() or not d.name.startswith("seed_"):
             continue
-        pkl = d / "synasc_results.pkl"
+        pkl = d / "mglass_run.pkl"
         if not pkl.is_file():
             continue
         with open(pkl, "rb") as fh:
@@ -476,7 +476,7 @@ def f_collect_loss_matrices(
             seed = int(d.name.split("_", 1)[1])
         except (IndexError, ValueError):
             continue
-        pkl = d / "synasc_results.pkl"
+        pkl = d / "mglass_run.pkl"
         if not pkl.is_file():
             continue
         with open(pkl, "rb") as fh:
@@ -634,7 +634,7 @@ def f_run_aggregate_plots(
 def f_child_has_torch(v_py: str) -> bool:
     r = subprocess.run(
         [v_py, "-c", "import torch"],
-        cwd=str(SYNASC_ROOT),
+        cwd=str(MGLASS_COMPARISON_ROOT),
         capture_output=True,
         text=True,
     )
@@ -669,7 +669,7 @@ def main() -> int:
         print(
             "Error: PyTorch is not importable with "
             f"{v_args.python!r}. Child runs need torch.\n"
-            f"  • In the bundle root: pip install -r {SYNASC_ROOT / 'requirements.txt'}\n"
+            f"  • In the bundle root: pip install -r {MGLASS_COMPARISON_ROOT / 'requirements.txt'}\n"
             "    (that file installs a CPU PyTorch build suitable for reproduction.)\n"
             "  • For AMD ROCm or NVIDIA CUDA, reinstall torch per README.rst and "
             "requirements-rocm.txt / https://pytorch.org/get-started/\n"
