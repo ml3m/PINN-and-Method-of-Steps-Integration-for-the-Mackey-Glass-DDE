@@ -7,7 +7,7 @@ PyTorch PINN with ROCm GPU acceleration (AMD RX 6700S / gfx1032).
 Produces KdV-style comparison figures:
   - Solution heatmap u(t) with marked training snapshot locations
   - Training data overlays at selected time windows
-  - Quantitative comparison table (MSE, relative L2, wall time)
+  - Quantitative comparison table (MSE, relative discrete l^2_N on grid, wall time)
   - Delay-coordinate embedding visualizations
 
 Usage (from the ``synasc/`` directory, or with absolute paths):
@@ -897,7 +897,7 @@ def f_compute_metrics(
     p_x_ref: np.ndarray,
     p_x_pred: np.ndarray,
 ) -> Dict[str, float]:
-    """Compute MSE and relative L2 error."""
+    """Compute MSE and relative discrete l^2_N error on the evaluation grid."""
     v_mse = float(np.mean((p_x_ref - p_x_pred) ** 2))
     v_rel_l2 = float(np.sqrt(np.sum((p_x_ref - p_x_pred) ** 2) / np.sum(p_x_ref ** 2)))
     v_max_err = float(np.max(np.abs(p_x_ref - p_x_pred)))
@@ -1623,7 +1623,7 @@ def f_export_table_latex(
          f"- {gamma_p:.4f}\\,x$"],
         ["MSE  (Classical / PINN)",
          f"${p_metrics_classical['mse']:.2e}$  /  ${p_metrics_pinn['mse']:.2e}$"],
-        ["Rel. $L^2$  (Classical / PINN)",
+        ["Rel. $\\ell^2_N$  (Classical / PINN)",
          f"${p_metrics_classical['rel_l2']:.4f}$  /  ${p_metrics_pinn['rel_l2']:.4f}$"],
     ]
 
@@ -1838,7 +1838,7 @@ def f_create_synasc_figure(
          f"- {gamma_t}\\,x$"],
         ["MSE  (Classical DDE / PINN)",
          f"${p_metrics_classical['mse']:.2e}$  /  ${p_metrics_pinn['mse']:.2e}$"],
-        ["Rel. $L^2$  (Classical DDE / PINN)",
+        ["Rel. $\\ell^2_N$  (Classical DDE / PINN)",
          f"${p_metrics_classical['rel_l2']:.4f}$  /  ${p_metrics_pinn['rel_l2']:.4f}$"],
     ]
     ax_tab = plt.subplot(gs2[0, 0])
@@ -2015,7 +2015,7 @@ def f_create_metrics_table_figure(
     fig, ax = plt.subplots(figsize=(12, 0.6 + 0.5 * len(l_rows)))
     ax.axis("off")
     cols = ["$n$", "MSE\n(Classical)", "MSE\n(PINN)",
-            "Rel. $L^2$\n(Classical)", "Rel. $L^2$\n(PINN)",
+            "Rel. $\\ell^2_N$\n(Classical)", "Rel. $\\ell^2_N$\n(PINN)",
             "Time (s)\n(Classical)", "Time (s)\n(PINN)"]
     tbl = ax.table(cellText=l_rows, colLabels=cols, cellLoc="center",
                     loc="center", bbox=[0, 0, 1, 1])
@@ -2248,7 +2248,7 @@ def main():
         v_x_classical_at_ref = v_interp_classical(v_t_ref)
         d_metrics_classical = f_compute_metrics(v_x_ref, v_x_classical_at_ref)
         print(f"  [Classical] MSE={d_metrics_classical['mse']:.2e}, "
-              f"Rel L2={d_metrics_classical['rel_l2']:.6f}")
+              f"rel $\\ell^2_N$={d_metrics_classical['rel_l2']:.6f}")
 
         # ── PINN ──
         d_pinn_result = None
@@ -2287,7 +2287,7 @@ def main():
                 d_params_pinn = d_pinn_result["params"]
 
                 print(f"  [PINN] MSE={d_metrics_pinn['mse']:.2e}, "
-                      f"Rel L2={d_metrics_pinn['rel_l2']:.6f}, "
+                      f"rel $\\ell^2_N$={d_metrics_pinn['rel_l2']:.6f}, "
                       f"Wall time={v_wall_pinn:.1f}s")
                 print(f"  [PINN] Identified params: {d_params_pinn}")
             except Exception as e:
