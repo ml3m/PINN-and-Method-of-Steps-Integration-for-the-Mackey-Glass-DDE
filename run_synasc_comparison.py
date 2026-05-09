@@ -25,10 +25,13 @@ are written under ``synasc/results/`` (see ``--output-dir``).
     ``problem.time_span``) with ``L=25``, ``O=5``.
     Window construction is in ``f_build_time_windows``.
 
-Re-export the 3D delay-embedding overlay (new colours, PDF/PNG) from a finished run::
+Re-export the 3D overlay (four POVs + ``*_2x2.png`` grid) from a finished run::
 
     python run_synasc_comparison.py --only-3d-overlay \\
         --output-dir results/my_run --n-values 10
+
+Writes ``n10_3d_overlay.png``, ``n10_3d_overlay_pov_*.png`` for the other cameras,
+and ``n10_3d_overlay_2x2.png`` (PDFs too unless ``--no-pdf``).
 
 ``synasc_results.pkl`` must exist under ``--output-dir`` unless you pass ``--from-pkl``.
 """
@@ -69,7 +72,11 @@ except ImportError as _e:
     ) from _e
 
 import matplotlib
-matplotlib.use("Agg")
+# Batch jobs: Agg (default). Interactive tools: set SYNASC_MPL_INTERACTIVE=1 before import.
+if os.environ.get("SYNASC_MPL_INTERACTIVE", "").lower() in ("1", "true", "yes"):
+    matplotlib.use(os.environ.get("MPLBACKEND", "TkAgg"), force=True)
+else:
+    matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import matplotlib.ticker as ticker
@@ -924,10 +931,152 @@ def _save(fig, path):
 _IEEE_COL_W = 3.5   # single-column width in inches
 _IEEE_2COL_W = 7.16  # full-width (2-column) in inches
 
-# 3D overlay: high contrast (avoid gray vs black)
-_COLOR_3D_REF = "#0072B2"          # blue — fine RK4 reference
-_COLOR_3D_CLASSICAL = "#D55E00"  # orange — MoS classical
-_COLOR_3D_PINN = "#6A1B9A"       # purple — PINN
+# 3D overlay (Fig.~5): black RK4 ref; indigo MoS (distinct from black + purple PINN)
+_COLOR_3D_REF = "k"             # black — fine RK4 reference
+_COLOR_3D_CLASSICAL = "#3F51B5" # indigo — MoS / classical (vs #780078 PINN)
+_COLOR_3D_PINN = "#780078"      # purple — PINN (thesis Adam predictor style)
+
+# Four cameras for multi-panel overlay exports (primary = first tuple).
+_OVERLAY_3D_VIEW_QUAD = (
+    (30.0, 45.0),
+    (28.0, -120.0),
+    (22.0, 135.0),
+    (40.0, -40.0),
+)
+
+
+def _slug_overlay_view(elev: float, azim: float) -> str:
+    """Stable filename fragment, e.g. e30_a45, e28_am120."""
+    e = int(round(float(elev)))
+    a = int(round(float(azim)))
+    a = ((a + 180) % 360) - 180
+    if a < 0:
+        return f"e{e}_am{abs(a)}"
+    return f"e{e}_a{a}"
+
+
+def _f_embed_3d_branch(p_x: np.ndarray, ds: int):
+    """Return (x(t), x(t-τ), x(t-2τ)) or None."""
+    p_x = np.asarray(p_x).reshape(-1)
+    if len(p_x) <= 2 * ds:
+        return None
+    return (
+        p_x[2 * ds:].copy(),
+        p_x[ds:-ds].copy(),
+        p_x[:-2 * ds].copy(),
+    )
+
+
+def _f_bounds_xyz_from_branches(branches) -> Optional[Tuple]:
+    """branches: iterable of (x,y,z) or None."""
+    xs, ys, zs = [], [], []
+    for b in branches:
+        if b is None:
+            continue
+        x, y, z = b
+        xs.extend([float(np.min(x)), float(np.max(x))])
+        ys.extend([float(np.min(y)), float(np.max(y))])
+        zs.extend([float(np.min(z)), float(np.max(z))])
+    if not xs:
+        return None
+    pad = 0.02
+    def _pad(lo, hi):
+        d = max(hi - lo, 1e-9)
+        return lo - pad * d, hi + pad * d
+    return (
+        _pad(min(xs), max(xs)),
+        _pad(min(ys), max(ys)),
+        _pad(min(zs), max(zs)),
+    )
+
+
+def _f_draw_3d_overlay_on_ax(
+    ax,
+    *,
+    branch_ref,
+    branch_cl,
+    branch_pinn,
+    p_z_floor_shadow: Optional[float],
+    p_n_value: float,
+    p_elev: float,
+    p_azim: float,
+    p_dist: float,
+    p_font_title: int,
+    p_font_label: int,
+    p_font_tick: int,
+    p_font_legend: int,
+    p_lw_ref: float,
+    p_lw_cl: float,
+    p_lw_pinn: float,
+    p_alpha_ref: float,
+    p_alpha_cl: float,
+    p_alpha_pinn: float,
+    p_bounds: Optional[Tuple],
+    p_show_title: bool,
+    p_show_legend: bool,
+    p_title_suffix: str = "",
+):
+    """Draw overlay trajectories on a 3D axis; optional equal bounds for grids."""
+    if p_z_floor_shadow is not None and branch_ref is not None:
+        xr, xr1, xr2 = branch_ref
+        ax.plot(
+            xr, xr1, np.full_like(xr, p_z_floor_shadow),
+            color="gray", linewidth=1.0, alpha=0.25, zorder=1,
+        )
+    if branch_ref is not None:
+        xr, xr1, xr2 = branch_ref
+        ax.plot(
+            xr, xr1, xr2,
+            color=_COLOR_3D_REF,
+            linewidth=p_lw_ref,
+            alpha=p_alpha_ref,
+            label=r"RK4 reference ($\Delta t = 10^{-3}$)",
+            zorder=2,
+        )
+    if branch_cl is not None:
+        xc, yc, zc = branch_cl
+        ax.plot(
+            xc, yc, zc,
+            color=_COLOR_3D_CLASSICAL,
+            linewidth=p_lw_cl,
+            alpha=p_alpha_cl,
+            label="Classical DDE solver",
+            zorder=5,
+        )
+    if branch_pinn is not None:
+        xp, yp, zp = branch_pinn
+        ax.plot(
+            xp, yp, zp,
+            color=_COLOR_3D_PINN,
+            linewidth=p_lw_pinn,
+            alpha=p_alpha_pinn,
+            linestyle="--",
+            label="PINN",
+            zorder=10,
+        )
+
+    ax.set_xlabel("$x(t)$", fontsize=p_font_label, labelpad=2)
+    ax.set_ylabel("$x(t{-}\\tau)$", fontsize=p_font_label, labelpad=2)
+    ax.set_zlabel("$x(t{-}2\\tau)$", fontsize=p_font_label, labelpad=2)
+    if p_show_title:
+        ax.set_title(
+            f"Mackey-Glass ($n={p_n_value:g}$){p_title_suffix}",
+            fontsize=p_font_title, fontweight="bold", pad=6,
+        )
+    ax.tick_params(axis="both", labelsize=p_font_tick, pad=1)
+    ax.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+    ax.yaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+    ax.zaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
+    ax.grid(False)
+    ax.view_init(elev=p_elev, azim=p_azim)
+    ax.dist = p_dist
+    if p_bounds is not None:
+        ax.set_xlim(p_bounds[0])
+        ax.set_ylim(p_bounds[1])
+        ax.set_zlim(p_bounds[2])
+    if p_show_legend:
+        ax.legend(fontsize=p_font_legend, loc="upper left", framealpha=0.85)
+
 
 def _delay_indices(t: np.ndarray, tau: float):
     """Return integer lag corresponding to delay tau on a uniform grid."""
@@ -1056,67 +1205,140 @@ def f_export_3d_overlay(
 ):
     """
     Overlay fine RK4 reference, classical MoS, and PINN in 3D delay space.
-    Colours: blue / orange / purple for contrast (single IEEE column).
+
+    Black RK4 reference, indigo MoS trajectory, dashed purple PINN (#780078),
+    transparent panes, no grid, and a floor shadow of the reference curve.
+
+    Writes:
+
+    1. ``p_output_path`` — primary camera (first entry in ``_OVERLAY_3D_VIEW_QUAD``).
+    2. Three sibling files ``{stem}_pov_{elev_azim_tag}.png`` for the other cameras.
+    3. A composite ``{stem}_2x2.png`` (shared limits; legend on the first panel only).
     """
     ds_ref = _delay_indices(p_t_ref, p_tau)
     ds_cl = _delay_indices(p_t_classical, p_tau)
     ds_p = _delay_indices(p_t_pinn_test.flatten(), p_tau)
 
-    fig = plt.figure(figsize=(_IEEE_COL_W, 3.2))
-    ax = fig.add_subplot(111, projection="3d")
+    _FIG_W, _FIG_H = 5.0, 6.0
+    _FONT_TITLE, _FONT_LABEL, _FONT_TICK = 11, 9, 7
+    _FONT_LEGEND = 7
+    _LW_REF, _LW_CL, _LW_PINN = 1.2, 1.5, 1.2
+    _ALPHA_REF, _ALPHA_CL, _ALPHA_PINN = 0.88, 0.9, 0.8
+    _DIST = 11
 
-    if len(p_x_ref) > 2 * ds_ref:
-        xr = p_x_ref[2 * ds_ref:]
-        xr1 = p_x_ref[ds_ref:-ds_ref]
-        xr2 = p_x_ref[:-2 * ds_ref]
-        ax.plot(
-            xr, xr1, xr2,
-            color=_COLOR_3D_REF,
-            linewidth=0.55,
-            alpha=0.88,
-            label="Fine RK4 reference",
-            zorder=2,
+    xp = np.asarray(p_x_pinn[:, 0]).reshape(-1)
+    branch_ref = (
+        _f_embed_3d_branch(p_x_ref, ds_ref)
+        if len(np.asarray(p_x_ref).reshape(-1)) > 2 * ds_ref else None
+    )
+    branch_cl = (
+        _f_embed_3d_branch(p_x_classical, ds_cl)
+        if len(np.asarray(p_x_classical).reshape(-1)) > 2 * ds_cl else None
+    )
+    branch_pn = _f_embed_3d_branch(xp, ds_p) if len(xp) > 2 * ds_p else None
+
+    z_floor = None
+    if branch_ref is not None:
+        z_floor = float(np.min(branch_ref[2]) - 0.05)
+
+    v_bounds = _f_bounds_xyz_from_branches([branch_ref, branch_cl, branch_pn])
+    if v_bounds is None:
+        return
+
+    v_base = os.path.splitext(p_output_path)[0]
+
+    def _emit_one(v_path: str, v_elev: float, v_azim: float,
+                  v_show_title: bool, v_show_legend: bool, v_suffix: str,
+                  v_use_bounds: Optional[Tuple],
+                  v_ftitle: int, v_flabel: int, v_ftick: int, v_fleg: int):
+        fig = plt.figure(figsize=(_FIG_W, _FIG_H))
+        ax = fig.add_subplot(111, projection="3d")
+        _f_draw_3d_overlay_on_ax(
+            ax,
+            branch_ref=branch_ref,
+            branch_cl=branch_cl,
+            branch_pinn=branch_pn,
+            p_z_floor_shadow=z_floor,
+            p_n_value=p_n_value,
+            p_elev=v_elev,
+            p_azim=v_azim,
+            p_dist=_DIST,
+            p_font_title=v_ftitle,
+            p_font_label=v_flabel,
+            p_font_tick=v_ftick,
+            p_font_legend=v_fleg,
+            p_lw_ref=_LW_REF,
+            p_lw_cl=_LW_CL,
+            p_lw_pinn=_LW_PINN,
+            p_alpha_ref=_ALPHA_REF,
+            p_alpha_cl=_ALPHA_CL,
+            p_alpha_pinn=_ALPHA_PINN,
+            p_bounds=v_use_bounds,
+            p_show_title=v_show_title,
+            p_show_legend=v_show_legend,
+            p_title_suffix=v_suffix,
+        )
+        fig.tight_layout(pad=0.4)
+        if not v_path.endswith(".png"):
+            v_path = f"{os.path.splitext(v_path)[0]}.png"
+        _save(fig, v_path)
+
+    for v_i, (v_el, v_az) in enumerate(_OVERLAY_3D_VIEW_QUAD):
+        v_slug = _slug_overlay_view(v_el, v_az)
+        if v_i == 0:
+            v_path_cur = (
+                p_output_path if p_output_path.lower().endswith(".png")
+                else f"{v_base}.png"
+            )
+        else:
+            v_path_cur = f"{v_base}_pov_{v_slug}.png"
+        _emit_one(
+            v_path_cur, v_el, v_az,
+            v_show_title=True, v_show_legend=True, v_suffix="",
+            v_use_bounds=None,
+            v_ftitle=_FONT_TITLE, v_flabel=_FONT_LABEL,
+            v_ftick=_FONT_TICK, v_fleg=_FONT_LEGEND,
         )
 
-    if len(p_x_classical) > 2 * ds_cl:
-        xt_cl = p_x_classical[2 * ds_cl:]
-        xt1_cl = p_x_classical[ds_cl: -ds_cl]
-        xt2_cl = p_x_classical[: -2 * ds_cl]
-        ax.plot(
-            xt_cl, xt1_cl, xt2_cl,
-            color=_COLOR_3D_CLASSICAL,
-            linewidth=0.55,
-            alpha=0.9,
-            label="Classical DDE solver",
-            zorder=4,
+    _GRID_W, _GRID_H = 10.0, 12.0
+    _GTITLE, _GLABEL, _GTICK, _GLEG = 9, 8, 6, 6
+
+    fig_g = plt.figure(figsize=(_GRID_W, _GRID_H))
+    for v_i, (v_el, v_az) in enumerate(_OVERLAY_3D_VIEW_QUAD):
+        ax_g = fig_g.add_subplot(2, 2, v_i + 1, projection="3d")
+        v_panel = chr(ord("a") + v_i)
+        _f_draw_3d_overlay_on_ax(
+            ax_g,
+            branch_ref=branch_ref,
+            branch_cl=branch_cl,
+            branch_pinn=branch_pn,
+            p_z_floor_shadow=z_floor,
+            p_n_value=p_n_value,
+            p_elev=v_el,
+            p_azim=v_az,
+            p_dist=_DIST,
+            p_font_title=_GTITLE,
+            p_font_label=_GLABEL,
+            p_font_tick=_GTICK,
+            p_font_legend=_GLEG,
+            p_lw_ref=_LW_REF,
+            p_lw_cl=_LW_CL,
+            p_lw_pinn=_LW_PINN,
+            p_alpha_ref=_ALPHA_REF,
+            p_alpha_cl=_ALPHA_CL,
+            p_alpha_pinn=_ALPHA_PINN,
+            p_bounds=v_bounds,
+            p_show_title=True,
+            p_show_legend=(v_i == 0),
+            p_title_suffix=f" ({v_panel})",
         )
-
-    xp = p_x_pinn[:, 0]
-    if len(xp) > 2 * ds_p:
-        xt_p = xp[2 * ds_p:]
-        xt1_p = xp[ds_p: -ds_p]
-        xt2_p = xp[: -2 * ds_p]
-        ax.plot(
-            xt_p, xt1_p, xt2_p,
-            color=_COLOR_3D_PINN,
-            linewidth=0.55,
-            alpha=0.88,
-            linestyle="--",
-            label="PINN",
-            zorder=6,
-        )
-
-    ax.set_xlabel("$x(t)$", fontsize=8, labelpad=2)
-    ax.set_ylabel("$x(t{-}\\tau)$", fontsize=8, labelpad=2)
-    ax.set_zlabel("$x(t{-}2\\tau)$", fontsize=8, labelpad=2)
-    ax.set_title(f"Mackey-Glass ($n={p_n_value:g}$)", fontsize=9, pad=4)
-    ax.tick_params(axis="both", labelsize=6, pad=1)
-    ax.view_init(elev=25, azim=-55)
-    ax.dist = 11
-    ax.legend(fontsize=7, loc="upper left", framealpha=0.8)
-
-    fig.tight_layout(pad=0.3)
-    _save(fig, p_output_path)
+    fig_g.suptitle(
+        f"Mackey-Glass ($n={p_n_value:g}$) — 3D delay embedding overlays",
+        fontsize=12, fontweight="bold", y=0.995,
+    )
+    fig_g.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+    v_grid_path = f"{v_base}_2x2.png"
+    _save(fig_g, v_grid_path)
 
 
 def f_export_3d_error_surface(
