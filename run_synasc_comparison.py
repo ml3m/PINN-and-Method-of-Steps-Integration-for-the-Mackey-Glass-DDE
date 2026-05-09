@@ -24,6 +24,13 @@ are written under ``synasc/results/`` (see ``--output-dir``).
     the windowed recipe on ``[0,100]`` (horizon matches ``data.t_total`` /
     ``problem.time_span``) with ``L=25``, ``O=5``.
     Window construction is in ``f_build_time_windows``.
+
+Re-export the 3D delay-embedding overlay (new colours, PDF/PNG) from a finished run::
+
+    python run_synasc_comparison.py --only-3d-overlay \\
+        --output-dir results/my_run --n-values 10
+
+``synasc_results.pkl`` must exist under ``--output-dir`` unless you pass ``--from-pkl``.
 """
 
 import os
@@ -659,15 +666,43 @@ def _f_train_single_window(
     return l_loss, l_data_l, l_phy_l, wall
 
 
+def f_stitch_pinn_on_grid(
+    models: List[Tuple[float, float, MackeyGlassPINN]],
+    t_grid_np: np.ndarray,
+    device: torch.device,
+) -> np.ndarray:
+    """Evaluate stitched PINN on ``t_grid_np`` (later windows overwrite overlaps)."""
+    v_x_out = np.zeros(t_grid_np.shape[0], dtype=np.float64)
+    for wt0, wt1, mdl in models:
+        mask = (t_grid_np >= wt0) & (t_grid_np <= wt1)
+        idx = np.where(mask)[0]
+        if idx.size == 0:
+            continue
+        with torch.no_grad():
+            t_t = torch.tensor(
+                t_grid_np[idx], dtype=torch.float32, device=device
+            ).unsqueeze(1)
+            v_x_out[idx] = mdl(t_t).cpu().numpy().ravel()
+    return v_x_out
+
+
 def f_train_pinn_mackey_glass(
     p_config: Dict[str, Any],
     p_n_value: float,
+    p_metric_t_ref: Optional[np.ndarray] = None,
+    p_junction_t_ref: Optional[np.ndarray] = None,
+    p_junction_x_ref: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """
     Train a PyTorch PINN on the Mackey-Glass DDE using time-domain decomposition.
 
     Features: windowed training, curriculum learning, adaptive residual sampling,
     Fourier features, 6x256 network, Adam + L-BFGS hybrid.
+
+    Optional ``p_junction_*``: fine reference trajectory for junction loss at
+    window starts (defaults to the training-supervisor RK4 grid).
+    Optional ``p_metric_t_ref``: extra time grid for stitched evaluation
+    (``u_pred_metric_ref`` in the return dict).
     """
     d_config = copy.deepcopy(p_config)
 
@@ -731,6 +766,12 @@ def f_train_pinn_mackey_glass(
 
     ref_interp = interp1d(v_t_ref_np, v_x_ref_np, kind="cubic",
                           fill_value="extrapolate")
+    junction_interp = ref_interp
+    if p_junction_t_ref is not None and p_junction_x_ref is not None:
+        junction_interp = interp1d(
+            p_junction_t_ref, p_junction_x_ref, kind="cubic",
+            fill_value="extrapolate",
+        )
 
     for wi, (wt0, wt1) in enumerate(windows):
         label = f"W{wi} [{wt0:.0f}-{wt1:.0f}]"
@@ -778,7 +819,7 @@ def f_train_pinn_mackey_glass(
               f"fourier={v_fourier}")
 
         ic_t_val = wt0 if wi > 0 else None
-        ic_x_val = float(ref_interp(wt0)) if wi > 0 else None
+        ic_x_val = float(junction_interp(wt0)) if wi > 0 else None
 
         wl, wdl, wpl, w_wall = _f_train_single_window(
             model, device, d_config,
@@ -817,21 +858,11 @@ def f_train_pinn_mackey_glass(
     # Evaluate: stitch predictions from all windows
     v_n_test = int(d_config["optimizer_comparison"]["visualization"]["test_points"])
     v_t_test_np = np.linspace(0.0, v_t_end, v_n_test)
-    v_x_pred_np = np.zeros(v_n_test)
+    v_x_pred_np = f_stitch_pinn_on_grid(models, v_t_test_np, device)
 
-    for wt0, wt1, mdl in models:
-        mask = (v_t_test_np >= wt0) & (v_t_test_np <= wt1)
-        idx = np.where(mask)[0]
-        if len(idx) == 0:
-            continue
-        with torch.no_grad():
-            t_t = torch.tensor(v_t_test_np[idx], dtype=torch.float32,
-                               device=device).unsqueeze(1)
-            v_x_pred_np[idx] = mdl(t_t).cpu().numpy().flatten()
+    # For overlapping regions, later windows take priority (handled in stitch)
 
-    # For overlapping regions, later windows take priority (already overwritten)
-
-    return {
+    out: Dict[str, Any] = {
         "t_train": v_t_train_np.reshape(-1, 1),
         "u_train": v_x_train_np.reshape(-1, 1),
         "t_test": v_t_test_np.reshape(-1, 1),
@@ -843,6 +874,12 @@ def f_train_pinn_mackey_glass(
         "physics_loss_history": all_phy_l,
         "wall_time": v_wall_time,
     }
+    if p_metric_t_ref is not None:
+        v_tm = np.asarray(p_metric_t_ref, dtype=np.float64).ravel()
+        v_x_metric = f_stitch_pinn_on_grid(models, v_tm, device)
+        out["t_metric_ref"] = v_tm.reshape(-1, 1)
+        out["u_pred_metric_ref"] = v_x_metric.reshape(-1, 1)
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -887,6 +924,10 @@ def _save(fig, path):
 _IEEE_COL_W = 3.5   # single-column width in inches
 _IEEE_2COL_W = 7.16  # full-width (2-column) in inches
 
+# 3D overlay: high contrast (avoid gray vs black)
+_COLOR_3D_REF = "#0072B2"          # blue — fine RK4 reference
+_COLOR_3D_CLASSICAL = "#D55E00"  # orange — MoS classical
+_COLOR_3D_PINN = "#6A1B9A"       # purple — PINN
 
 def _delay_indices(t: np.ndarray, tau: float):
     """Return integer lag corresponding to delay tau on a uniform grid."""
@@ -1003,34 +1044,67 @@ def f_export_3d_attractor_single(
 
 
 def f_export_3d_overlay(
-    p_t_classical, p_x_classical,
-    p_t_pinn_test, p_x_pinn,
-    p_tau, p_n_value, p_output_path,
+    p_t_ref: np.ndarray,
+    p_x_ref: np.ndarray,
+    p_t_classical: np.ndarray,
+    p_x_classical: np.ndarray,
+    p_t_pinn_test: np.ndarray,
+    p_x_pinn: np.ndarray,
+    p_tau: float,
+    p_n_value: float,
+    p_output_path: str,
 ):
     """
-    Overlay: Classical (blue) + PINN (red) on the same 3D axes.
-    Single IEEE column width.
+    Overlay fine RK4 reference, classical MoS, and PINN in 3D delay space.
+    Colours: blue / orange / purple for contrast (single IEEE column).
     """
+    ds_ref = _delay_indices(p_t_ref, p_tau)
     ds_cl = _delay_indices(p_t_classical, p_tau)
     ds_p = _delay_indices(p_t_pinn_test.flatten(), p_tau)
 
     fig = plt.figure(figsize=(_IEEE_COL_W, 3.2))
     ax = fig.add_subplot(111, projection="3d")
 
+    if len(p_x_ref) > 2 * ds_ref:
+        xr = p_x_ref[2 * ds_ref:]
+        xr1 = p_x_ref[ds_ref:-ds_ref]
+        xr2 = p_x_ref[:-2 * ds_ref]
+        ax.plot(
+            xr, xr1, xr2,
+            color=_COLOR_3D_REF,
+            linewidth=0.55,
+            alpha=0.88,
+            label="Fine RK4 reference",
+            zorder=2,
+        )
+
     if len(p_x_classical) > 2 * ds_cl:
         xt_cl = p_x_classical[2 * ds_cl:]
         xt1_cl = p_x_classical[ds_cl: -ds_cl]
         xt2_cl = p_x_classical[: -2 * ds_cl]
-        ax.plot(xt_cl, xt1_cl, xt2_cl, color="#1f77b4",
-                linewidth=0.5, alpha=0.7, label="Classical DDE solver")
+        ax.plot(
+            xt_cl, xt1_cl, xt2_cl,
+            color=_COLOR_3D_CLASSICAL,
+            linewidth=0.55,
+            alpha=0.9,
+            label="Classical DDE solver",
+            zorder=4,
+        )
 
     xp = p_x_pinn[:, 0]
     if len(xp) > 2 * ds_p:
         xt_p = xp[2 * ds_p:]
         xt1_p = xp[ds_p: -ds_p]
         xt2_p = xp[: -2 * ds_p]
-        ax.plot(xt_p, xt1_p, xt2_p, color="#d62728",
-                linewidth=0.5, alpha=0.7, linestyle="--", label="PINN")
+        ax.plot(
+            xt_p, xt1_p, xt2_p,
+            color=_COLOR_3D_PINN,
+            linewidth=0.55,
+            alpha=0.88,
+            linestyle="--",
+            label="PINN",
+            zorder=6,
+        )
 
     ax.set_xlabel("$x(t)$", fontsize=8, labelpad=2)
     ax.set_ylabel("$x(t{-}\\tau)$", fontsize=8, labelpad=2)
@@ -1618,6 +1692,7 @@ def f_create_synasc_figure(
             os.path.join(v_dir, f"{v_prefix}_3d_classical.png"),
         )
         f_export_3d_overlay(
+            p_t_ref, p_x_ref,
             p_t_classical, p_x_classical,
             p_t_pinn_test, p_x_pinn,
             p_tau, p_n_value,
@@ -1811,7 +1886,31 @@ def f_parse_args():
         action="store_true",
         help="Save PNG only (skip PDF; faster on large multi-panel figures).",
     )
+    v_parser.add_argument(
+        "--only-3d-overlay",
+        action="store_true",
+        help="Load synasc_results.pkl and regenerate n*_3d_overlay.{png,pdf} only "
+             "(no classical solve, no reference RK4, no PINN).",
+    )
+    v_parser.add_argument(
+        "--from-pkl",
+        default=None,
+        help="Pickle path for --only-3d-overlay (default: OUTPUT_DIR/synasc_results.pkl).",
+    )
     return v_parser.parse_args()
+
+
+def _f_result_key_for_n(p_results: dict, p_n: float):
+    """Resolve dict key for Hill exponent (float / numpy scalar mismatches)."""
+    if p_n in p_results:
+        return p_n
+    for k in p_results:
+        try:
+            if abs(float(k) - float(p_n)) < 1e-9:
+                return k
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def main():
@@ -1819,8 +1918,47 @@ def main():
     v_args = f_parse_args()
     _SYNASC_SAVE_PDF = not v_args.no_pdf
 
-    v_args.config = f_resolve_synasc_config_path(v_args.config)
     v_args.output_dir = f_resolve_synasc_output_dir(v_args.output_dir)
+
+    if v_args.only_3d_overlay:
+        os.makedirs(v_args.output_dir, exist_ok=True)
+        v_pkl = v_args.from_pkl or os.path.join(v_args.output_dir, "synasc_results.pkl")
+        if not os.path.isfile(v_pkl):
+            raise SystemExit(f"--only-3d-overlay: pickle not found: {v_pkl}")
+        with open(v_pkl, "rb") as fh:
+            d_all_results = pickle.load(fh)
+        l_export_n = [float(x.strip()) for x in v_args.n_values.split(",")]
+        print("=" * 60)
+        print("ONLY 3D OVERLAY: loading", v_pkl)
+        print("  output:", v_args.output_dir)
+        print("  n values:", l_export_n)
+        print("=" * 60)
+        for v_n in l_export_n:
+            v_key = _f_result_key_for_n(d_all_results, v_n)
+            if v_key is None:
+                print(f"  [skip] n={v_n:g} not in pickle (keys: {list(d_all_results.keys())})")
+                continue
+            d_r = d_all_results[v_key]
+            v_xp = d_r.get("x_pinn")
+            if v_xp is None or (hasattr(v_xp, "size") and v_xp.size == 0):
+                print(f"  [skip] n={v_n:g}: no PINN trajectory in pickle")
+                continue
+            v_tau = float(d_r.get("tau", np.nan))
+            if not np.isfinite(v_tau):
+                print(f"  [skip] n={v_n:g}: missing tau in pickle")
+                continue
+            v_out = os.path.join(v_args.output_dir, f"n{v_n:g}_3d_overlay.png")
+            f_export_3d_overlay(
+                d_r["t_ref"], d_r["x_ref"],
+                d_r["t_classical"], d_r["x_classical"],
+                d_r["t_pinn_test"], v_xp,
+                v_tau, v_n,
+                v_out,
+            )
+        print(f"\nDone. Overlay(s) written under {v_args.output_dir}/")
+        return
+
+    v_args.config = f_resolve_synasc_config_path(v_args.config)
 
     l_n_values = [float(x.strip()) for x in v_args.n_values.split(",")]
     os.makedirs(v_args.output_dir, exist_ok=True)
@@ -1900,14 +2038,30 @@ def main():
             print(f"  [PINN] Training PINN (n={v_n})...")
             d_config["_output_dir"] = v_args.output_dir
             try:
-                d_pinn_result = f_train_pinn_mackey_glass(d_config, v_n)
+                d_pinn_result = f_train_pinn_mackey_glass(
+                    d_config,
+                    v_n,
+                    p_metric_t_ref=v_t_ref,
+                    p_junction_t_ref=v_t_ref,
+                    p_junction_x_ref=v_x_ref,
+                )
                 v_wall_pinn = d_pinn_result["wall_time"]
 
-                v_interp_ref_at_pinn = interp1d(
-                    v_t_ref, v_x_ref, kind="cubic", fill_value="extrapolate",
-                )
-                v_x_ref_at_pinn_test = v_interp_ref_at_pinn(d_pinn_result["t_test"].flatten())
-                d_metrics_pinn = f_compute_metrics(v_x_ref_at_pinn_test, d_pinn_result["u_pred"][:, 0])
+                v_x_pinn_fine = d_pinn_result.get("u_pred_metric_ref")
+                if v_x_pinn_fine is not None:
+                    d_metrics_pinn = f_compute_metrics(
+                        v_x_ref, v_x_pinn_fine[:, 0]
+                    )
+                else:
+                    v_interp_ref_at_pinn = interp1d(
+                        v_t_ref, v_x_ref, kind="cubic", fill_value="extrapolate",
+                    )
+                    v_x_ref_at_pinn_test = v_interp_ref_at_pinn(
+                        d_pinn_result["t_test"].flatten()
+                    )
+                    d_metrics_pinn = f_compute_metrics(
+                        v_x_ref_at_pinn_test, d_pinn_result["u_pred"][:, 0]
+                    )
                 d_params_pinn = d_pinn_result["params"]
 
                 print(f"  [PINN] MSE={d_metrics_pinn['mse']:.2e}, "
