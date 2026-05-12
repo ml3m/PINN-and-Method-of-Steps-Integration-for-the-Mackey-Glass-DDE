@@ -1,0 +1,3 @@
+trajectory,lambda1,n_steps_used,t_spanned,delay_steps,h
+rk4_ref,0.04041826226495594,170000.0,170.0,2000.0,0.001
+pinn_stitched,0.05742718959484961,170000.0,170.0,2000.0,0.001

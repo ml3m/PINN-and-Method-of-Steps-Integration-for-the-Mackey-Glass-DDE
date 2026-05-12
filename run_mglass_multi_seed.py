@@ -209,6 +209,10 @@ def f_load_pickle_rows(seed_dir: Path) -> List[Dict[str, Any]]:
     for n_key, r in data.items():
         mp = r.get("metrics_pinn") or {}
         mc = r.get("metrics_classical") or {}
+        v_pinn = r.get("valid_prediction_time_pinn") or {}
+        v_cl = r.get("valid_prediction_time_classical") or {}
+        w_tr = r.get("wall_time_pinn_train", r.get("wall_time_pinn", np.nan))
+        w_if = r.get("wall_time_pinn_infer", np.nan)
         rows.append(
             {
                 "seed": seed,
@@ -220,7 +224,13 @@ def f_load_pickle_rows(seed_dir: Path) -> List[Dict[str, Any]]:
                 "mse_classical": float(mc.get("mse", np.nan)),
                 "rel_l2_classical": float(mc.get("rel_l2", np.nan)),
                 "wall_pinn_s": float(r.get("wall_time_pinn", np.nan)),
+                "wall_pinn_train_s": float(w_tr) if w_tr is not None else float("nan"),
+                "wall_pinn_infer_s": float(w_if) if w_if is not None else float("nan"),
                 "wall_classical_s": float(r.get("wall_time_classical", np.nan)),
+                "t_valid_pinn_0.1": float(v_pinn.get("0.1", np.nan)),
+                "t_valid_classical_0.1": float(v_cl.get("0.1", np.nan)),
+                "valid_pinn_json": json.dumps(v_pinn) if v_pinn else "",
+                "valid_classical_json": json.dumps(v_cl) if v_cl else "",
             }
         )
     return rows
@@ -280,7 +290,13 @@ def f_write_csv(v_rows: List[Dict[str, Any]], v_path: Path) -> None:
         "mse_classical",
         "rel_l2_classical",
         "wall_pinn_s",
+        "wall_pinn_train_s",
+        "wall_pinn_infer_s",
         "wall_classical_s",
+        "t_valid_pinn_0.1",
+        "t_valid_classical_0.1",
+        "valid_pinn_json",
+        "valid_classical_json",
         "seed_dir",
     ]
     with open(v_path, "w", newline="") as fh:

@@ -14,7 +14,9 @@ Usage (from the ``mglass_comparison/`` directory, or with absolute paths):
 
     python run_mglass_comparison.py \\
         [--config configs/config_mackey_glass_t200_windowed.yaml] \\
-        [--n-values 10] [--output-dir results/my_run]
+        [--n-values 10] [--output-dir results/my_run] \\
+        [--classical-dt 0.01] [--ref-dt 0.001] \\
+        [--reference-convergence] [--valid-thresholds 0.05,0.1,0.2]
 
 YAML recipes live in ``mglass_comparison/configs/``. By default, figures and ``mglass_run.pkl``
 are written under ``mglass_comparison/results/`` (see ``--output-dir``).
@@ -45,13 +47,16 @@ os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
 
 import sys
 import math
+import json
 import time
 import copy
 import pickle
+import platform
 import argparse
+import csv
 import warnings
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -767,7 +772,7 @@ def f_train_pinn_mackey_glass(
     for i, (a, b) in enumerate(windows):
         print(f"         Window {i}: [{a:.1f}, {b:.1f}]")
 
-    v_start = time.time()
+    v_start_train = time.perf_counter()
     all_loss, all_data_l, all_phy_l = [], [], []
     models: List[Tuple[float, float, MackeyGlassPINN]] = []
     prev_model = None
@@ -860,9 +865,10 @@ def f_train_pinn_mackey_glass(
         }, ckpt_path)
         print(f"  [{label}] Checkpoint saved: {ckpt_path}")
 
-    v_wall_time = time.time() - v_start
-    print(f"\n  [PINN] All windows complete in {v_wall_time:.1f}s")
+    v_wall_train = time.perf_counter() - v_start_train
+    print(f"\n  [PINN] All windows complete in {v_wall_train:.1f}s (training only)")
 
+    t_infer0 = time.perf_counter()
     # Evaluate: stitch predictions from all windows
     v_n_test = int(d_config["optimizer_comparison"]["visualization"]["test_points"])
     v_t_test_np = np.linspace(0.0, v_t_end, v_n_test)
@@ -880,18 +886,21 @@ def f_train_pinn_mackey_glass(
         "loss_history": all_loss,
         "data_loss_history": all_data_l,
         "physics_loss_history": all_phy_l,
-        "wall_time": v_wall_time,
+        "wall_time": v_wall_train,
+        "wall_time_train": v_wall_train,
+        "wall_time_infer": 0.0,
     }
     if p_metric_t_ref is not None:
         v_tm = np.asarray(p_metric_t_ref, dtype=np.float64).ravel()
         v_x_metric = f_stitch_pinn_on_grid(models, v_tm, device)
         out["t_metric_ref"] = v_tm.reshape(-1, 1)
         out["u_pred_metric_ref"] = v_x_metric.reshape(-1, 1)
+    out["wall_time_infer"] = float(time.perf_counter() - t_infer0)
     return out
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PART 3: Metrics
+# PART 3: Metrics and extended diagnostics
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def f_compute_metrics(
@@ -903,6 +912,232 @@ def f_compute_metrics(
     v_rel_l2 = float(np.sqrt(np.sum((p_x_ref - p_x_pred) ** 2) / np.sum(p_x_ref ** 2)))
     v_max_err = float(np.max(np.abs(p_x_ref - p_x_pred)))
     return {"mse": v_mse, "rel_l2": v_rel_l2, "max_abs_err": v_max_err}
+
+
+def f_first_exceedance_times(
+    p_t: np.ndarray,
+    p_x_ref: np.ndarray,
+    p_x_pred: np.ndarray,
+    p_thresholds: Sequence[float],
+) -> Dict[str, float]:
+    """
+    First time |x_pred - x_ref| strictly exceeds each threshold (same grid as p_t).
+    If never exceeded, value is NaN.
+    """
+    v_t = np.asarray(p_t, dtype=np.float64).ravel()
+    v_e = np.abs(np.asarray(p_x_ref, dtype=np.float64).ravel() - np.asarray(p_x_pred, dtype=np.float64).ravel())
+    out: Dict[str, float] = {}
+    for theta in p_thresholds:
+        mask = v_e > float(theta)
+        key = str(float(theta))
+        if not np.any(mask):
+            out[key] = float("nan")
+        else:
+            out[key] = float(v_t[np.argmax(mask)])
+    return out
+
+
+def f_segment_mse_table(
+    p_t: np.ndarray,
+    p_x_ref: np.ndarray,
+    p_x_pred: np.ndarray,
+    p_edges: Sequence[float],
+) -> Dict[str, float]:
+    """Piecewise MSE on half-open intervals [edges[i], edges[i+1]) in physical time."""
+    v_t = np.asarray(p_t, dtype=np.float64).ravel()
+    v_ref = np.asarray(p_x_ref, dtype=np.float64).ravel()
+    v_pr = np.asarray(p_x_pred, dtype=np.float64).ravel()
+    out: Dict[str, float] = {}
+    for i in range(len(p_edges) - 1):
+        a, b = float(p_edges[i]), float(p_edges[i + 1])
+        mask = (v_t >= a) & (v_t < b if i < len(p_edges) - 2 else v_t <= b)
+        if not np.any(mask):
+            out[f"[{a:g},{b:g}]"] = float("nan")
+        else:
+            out[f"[{a:g},{b:g}]"] = float(np.mean((v_ref[mask] - v_pr[mask]) ** 2))
+    return out
+
+
+def f_normalized_acf(p_x: np.ndarray, p_max_lag: int) -> np.ndarray:
+    """Unbiased ACF for lags 0..max_lag (normalized so lag-0 is 1)."""
+    v_x = np.asarray(p_x, dtype=np.float64).ravel()
+    v_x = v_x - np.mean(v_x)
+    n = v_x.size
+    var0 = float(np.dot(v_x, v_x)) / max(n, 1)
+    if var0 <= 0:
+        return np.zeros(p_max_lag + 1, dtype=np.float64)
+    out = np.empty(p_max_lag + 1, dtype=np.float64)
+    for k in range(p_max_lag + 1):
+        if k == 0:
+            out[k] = 1.0
+        else:
+            out[k] = float(np.dot(v_x[:-k], v_x[k:]) / (var0 * (n - k)))
+    return out
+
+
+def f_delay_embed_3d(p_x: np.ndarray, p_step: int) -> np.ndarray:
+    """3D Takens embedding [x[i], x[i-step], x[i-2*step]] for i >= 2*step."""
+    v_x = np.asarray(p_x, dtype=np.float64).ravel()
+    k = max(int(p_step), 1)
+    start = 2 * k
+    if v_x.size <= start:
+        return np.zeros((0, 3), dtype=np.float64)
+    a = v_x[start:]
+    b = v_x[start - k : -k]
+    c = v_x[start - 2 * k : -2 * k]
+    return np.column_stack([a, b, c])
+
+
+def f_chamfer_symmetric(p_a: np.ndarray, p_b: np.ndarray, p_max_points: int = 2048) -> float:
+    """Mean min distance A->B plus B->A (subsample large sets for speed)."""
+    if p_a.shape[0] == 0 or p_b.shape[0] == 0:
+        return float("nan")
+    rng = np.random.default_rng(0)
+    a = p_a.astype(np.float64, copy=False)
+    b = p_b.astype(np.float64, copy=False)
+    if a.shape[0] > p_max_points:
+        a = a[rng.choice(a.shape[0], size=p_max_points, replace=False)]
+    if b.shape[0] > p_max_points:
+        b = b[rng.choice(b.shape[0], size=p_max_points, replace=False)]
+    d_ab = np.sqrt(np.min(np.sum((a[:, None, :] - b[None, :, :]) ** 2, axis=2), axis=1))
+    d_ba = np.sqrt(np.min(np.sum((b[:, None, :] - a[None, :, :]) ** 2, axis=2), axis=1))
+    return float(0.5 * (np.mean(d_ab) + np.mean(d_ba)))
+
+
+def f_log_psd(p_x: np.ndarray, p_dt: float) -> Tuple[np.ndarray, np.ndarray]:
+    """One-sided positive frequencies and log10(PSD) for real x (detrended)."""
+    v_x = np.asarray(p_x, dtype=np.float64).ravel()
+    v_x = v_x - np.mean(v_x)
+    n = v_x.size
+    if n < 4:
+        return np.array([]), np.array([])
+    fft = np.fft.rfft(v_x)
+    psd = (np.abs(fft) ** 2) / (np.sum(np.hanning(n) ** 2) + 1e-30)
+    freq = np.fft.rfftfreq(n, d=float(p_dt))
+    psd = np.maximum(psd, 1e-30)
+    return freq, np.log10(psd)
+
+
+def f_psd_l2_distance(
+    p_x_ref: np.ndarray,
+    p_x_pred: np.ndarray,
+    p_dt: float,
+) -> float:
+    """L2 distance of log-PSD on the intersection of positive frequency grids."""
+    f0, s0 = f_log_psd(p_x_ref, p_dt)
+    f1, s1 = f_log_psd(p_x_pred, p_dt)
+    if f0.size < 2 or f1.size < 2:
+        return float("nan")
+    n = min(f0.size, f1.size)
+    return float(np.sqrt(np.mean((s0[:n] - s1[:n]) ** 2)))
+
+
+def f_attractor_metrics_bundle(
+    p_t_ref: np.ndarray,
+    p_x_ref: np.ndarray,
+    p_x_pred: np.ndarray,
+    p_tau: float,
+    p_dt: float,
+) -> Dict[str, Any]:
+    """Phase-insensitive diagnostics: stats, ACF lag=tau, PSD gap, delay-embedding Chamfer."""
+    v_t = np.asarray(p_t_ref, dtype=np.float64).ravel()
+    xr = np.asarray(p_x_ref, dtype=np.float64).ravel()
+    xp = np.asarray(p_x_pred, dtype=np.float64).ravel()
+    delay_idx = int(max(1, round(float(p_tau) / float(p_dt))))
+    acf_r = f_normalized_acf(xr, min(delay_idx * 3, 200))
+    acf_p = f_normalized_acf(xp, min(delay_idx * 3, 200))
+    lag_sel = min(delay_idx, acf_r.size - 1, acf_p.size - 1)
+    emb_r = f_delay_embed_3d(xr, delay_idx)
+    emb_p = f_delay_embed_3d(xp, delay_idx)
+    n = min(emb_r.shape[0], emb_p.shape[0])
+    if n > 0:
+        emb_r = emb_r[-n:]
+        emb_p = emb_p[-n:]
+    return {
+        "mean_ref": float(np.mean(xr)),
+        "mean_pred": float(np.mean(xp)),
+        "std_ref": float(np.std(xr, ddof=0)),
+        "std_pred": float(np.std(xp, ddof=0)),
+        "min_ref": float(np.min(xr)),
+        "max_ref": float(np.max(xr)),
+        "min_pred": float(np.min(xp)),
+        "max_pred": float(np.max(xp)),
+        "acf_lag_tau_ref": float(acf_r[lag_sel]) if lag_sel < acf_r.size else float("nan"),
+        "acf_lag_tau_pred": float(acf_p[lag_sel]) if lag_sel < acf_p.size else float("nan"),
+        "psd_log_l2": f_psd_l2_distance(xr, xp, float(p_dt)),
+        "delay_embed_chamfer": f_chamfer_symmetric(emb_r, emb_p),
+        "delay_embedding_step": int(delay_idx),
+    }
+
+
+def f_reference_rk4_convergence_rows(
+    p_beta: float,
+    p_gamma: float,
+    p_n: float,
+    p_tau: float,
+    p_x0: float,
+    p_t_end: float,
+    p_dt_finest: float,
+    p_dt_coarser: Sequence[float],
+) -> List[Dict[str, Any]]:
+    """Pair each RK4(dt) trajectory against the finest RK4 grid; report discrepancy."""
+    t_f, x_f = f_solve_mackey_glass_rk4_fixed(
+        p_beta, p_gamma, p_n, p_tau, p_x0, p_t_end, p_dt_finest,
+    )
+    rows: List[Dict[str, Any]] = []
+    for dt in p_dt_coarser:
+        if abs(float(dt) - float(p_dt_finest)) < 1e-15:
+            rows.append(
+                {
+                    "n": float(p_n),
+                    "dt": float(dt),
+                    "mse_vs_finest": 0.0,
+                    "rel_l2_vs_finest": 0.0,
+                    "max_abs_vs_finest": 0.0,
+                }
+            )
+            continue
+        t_c, x_c = f_solve_mackey_glass_rk4_fixed(
+            p_beta, p_gamma, p_n, p_tau, p_x0, p_t_end, float(dt),
+        )
+        interp_c = interp1d(t_c, x_c, kind="cubic", fill_value="extrapolate")
+        x_on_f = interp_c(t_f)
+        m = f_compute_metrics(x_f, x_on_f)
+        rows.append(
+            {
+                "n": float(p_n),
+                "dt": float(dt),
+                "mse_vs_finest": m["mse"],
+                "rel_l2_vs_finest": m["rel_l2"],
+                "max_abs_vs_finest": m["max_abs_err"],
+            }
+        )
+    return rows
+
+
+def f_capture_runtime_env() -> Dict[str, Any]:
+    """Versions and hardware for reproducibility notes (torch may be missing pieces on import)."""
+    d: Dict[str, Any] = {
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+        "processor": platform.processor() or "",
+    }
+    try:
+        import scipy
+
+        d["scipy_version"] = scipy.__version__
+    except ImportError:
+        d["scipy_version"] = None
+    d["pytorch_version"] = torch.__version__
+    d["torch_num_threads"] = torch.get_num_threads()
+    d["omp_num_threads"] = os.environ.get("OMP_NUM_THREADS")
+    d["mkl_num_threads"] = os.environ.get("MKL_NUM_THREADS")
+    d["hip_version"] = getattr(torch.version, "hip", None)
+    if torch.cuda.is_available():
+        d["cuda_device"] = torch.cuda.get_device_name(0)
+    else:
+        d["cuda_device"] = None
+    return d
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1411,7 +1646,8 @@ def f_export_heatmap(
     Builds a 2D image [rows x time] where each row is a slightly
     time-shifted copy of x(t), giving a gradient colored band similar
     to the KdV u(t,x) plot.  White vertical lines mark snapshots.
-    Classical DDE solver and PINN solutions are shown side-by-side.
+    Classical DDE solver and PINN solutions are shown as two wide horizontal
+    strips (stacked vertically).
     """
     n_rows = 100
     tau_vis = 2.0
@@ -1437,10 +1673,10 @@ def f_export_heatmap(
         img_base[i, :] = base_interp(t_grid + s)
         img_pinn[i, :] = pinn_interp(t_grid + s)
 
-    fig = plt.figure(figsize=(10, 7))
+    fig = plt.figure(figsize=(13, 8))
 
-    gs = gridspec.GridSpec(1, 2, wspace=0.35, left=0.08, right=0.92,
-                           top=0.88, bottom=0.12)
+    gs = gridspec.GridSpec(2, 1, hspace=0.38, left=0.08, right=0.92,
+                           top=0.90, bottom=0.07)
 
     extent = [t_grid.min(), t_grid.max(), shifts.min(), shifts.max()]
     vmin = np.nanmin(img_base)
@@ -1453,20 +1689,20 @@ def f_export_heatmap(
     for ts in p_snapshot_times:
         ax0.plot([ts, ts], [shifts.min(), shifts.max()], "w-", linewidth=1.0)
     divider0 = make_axes_locatable(ax0)
-    cax0 = divider0.append_axes("right", size="5%", pad=0.05)
+    cax0 = divider0.append_axes("right", size="2.5%", pad=0.06)
     fig.colorbar(h0, cax=cax0)
     ax0.set_xlabel("$t$")
     ax0.set_ylabel("time shift $\\delta$")
     ax0.set_title(base_title, fontsize=11)
 
-    ax1 = fig.add_subplot(gs[0, 1])
+    ax1 = fig.add_subplot(gs[1, 0])
     h1 = ax1.imshow(img_pinn, interpolation="nearest", cmap="rainbow",
                      extent=extent, origin="lower", aspect="auto",
                      vmin=vmin, vmax=vmax)
     for ts in p_snapshot_times:
         ax1.plot([ts, ts], [shifts.min(), shifts.max()], "w-", linewidth=1.0)
     divider1 = make_axes_locatable(ax1)
-    cax1 = divider1.append_axes("right", size="5%", pad=0.05)
+    cax1 = divider1.append_axes("right", size="2.5%", pad=0.06)
     fig.colorbar(h1, cax=cax1)
     ax1.set_xlabel("$t$")
     ax1.set_ylabel("time shift $\\delta$")
@@ -2086,7 +2322,40 @@ def f_parse_args():
         "--dt",
         type=float,
         default=None,
-        help="Override time step for classical solver",
+        help="Override config data.dt (training grid / YAML). For MoS output/max_step "
+        "use --classical-dt when set; otherwise MoS uses min(data.dt, 0.01).",
+    )
+    v_parser.add_argument(
+        "--classical-dt",
+        type=float,
+        default=None,
+        help="MoS-RK45 output grid spacing and scipy solve_ivp max_step (overrides min(dt,0.01)).",
+    )
+    v_parser.add_argument(
+        "--ref-dt",
+        type=float,
+        default=None,
+        help="Fixed-step RK4 reference trajectory dt (default: 0.001).",
+    )
+    v_parser.add_argument(
+        "--reference-convergence",
+        action="store_true",
+        help="Write reference_convergence.csv: RK4 self-discrepancy vs --ref-dt for --reference-convergence-dts.",
+    )
+    v_parser.add_argument(
+        "--reference-convergence-dts",
+        default="0.01,0.005,0.002,0.001",
+        help="Comma-separated RK4 dts compared against --ref-dt (must include ref-dt for baseline row).",
+    )
+    v_parser.add_argument(
+        "--valid-thresholds",
+        default="0.05,0.1,0.2,0.5",
+        help="Comma-separated |error| thresholds for first exceedance time T_valid.",
+    )
+    v_parser.add_argument(
+        "--no-extended-metrics",
+        action="store_true",
+        help="Skip segment MSE, T_valid, and attractor bundles (faster).",
     )
     v_parser.add_argument(
         "--n-sweep-grid",
@@ -2189,14 +2458,32 @@ def main():
     d_config = f_load_config(v_args.config)
     if v_args.seed is not None:
         d_config["_seed"] = int(v_args.seed)
+    if v_args.dt is not None:
+        d_config.setdefault("data", {})["dt"] = float(v_args.dt)
 
     v_beta = float(d_config["problem"]["beta_true"])
     v_gamma = float(d_config["problem"]["gamma_true"])
     v_tau = float(d_config["problem"]["tau"])
     v_x0 = float(d_config["problem"].get("initial_x_history", 1.2))
     v_t_end = v_args.t_end or float(d_config["data"]["t_total"])
-    v_dt = v_args.dt or float(d_config["data"]["dt"])
-    v_dt_fine = min(v_dt, 0.01)
+    v_dt_cfg = v_args.dt if v_args.dt is not None else float(d_config["data"]["dt"])
+    if v_args.classical_dt is not None:
+        v_dt_fine = float(v_args.classical_dt)
+    else:
+        v_dt_fine = min(v_dt_cfg, 0.01)
+    v_dt_ref = float(v_args.ref_dt) if v_args.ref_dt is not None else 0.001
+    l_valid_thr = [
+        float(x.strip())
+        for x in v_args.valid_thresholds.split(",")
+        if x.strip()
+    ]
+    l_ref_conv_dts = [
+        float(x.strip())
+        for x in v_args.reference_convergence_dts.split(",")
+        if x.strip()
+    ]
+    if v_args.reference_convergence:
+        l_ref_conv_dts = sorted(set(l_ref_conv_dts + [v_dt_ref]), reverse=True)
 
     if v_args.snapshot_times:
         l_snapshot_times = [float(x.strip()) for x in v_args.snapshot_times.split(",")]
@@ -2208,12 +2495,15 @@ def main():
         ]
 
     d_all_results = {}
+    l_ref_convergence_rows: List[Dict[str, Any]] = []
+    v_runtime_env = f_capture_runtime_env()
+    t_plot_total = 0.0
 
     print("=" * 80)
     print("MACKEY-GLASS COMPARISON: Classical DDE Solver vs PINN (Mackey-Glass)")
     print("=" * 80)
     print(f"  beta={v_beta}, gamma={v_gamma}, tau={v_tau}, x0={v_x0}")
-    print(f"  t_end={v_t_end}, dt_fine={v_dt_fine}")
+    print(f"  t_end={v_t_end}, classical_dt (MoS)={v_dt_fine}, ref_dt (RK4)={v_dt_ref}, config data.dt={v_dt_cfg}")
     print(f"  n values: {l_n_values}")
     print(f"  Snapshot times: {l_snapshot_times}")
     print(f"  Output: {v_args.output_dir}")
@@ -2224,29 +2514,41 @@ def main():
         print(f"  Hill exponent n = {v_n}")
         print(f"{'─' * 60}")
 
+        if v_args.reference_convergence and l_ref_conv_dts:
+            l_ref_convergence_rows.extend(
+                f_reference_rk4_convergence_rows(
+                    v_beta, v_gamma, v_n, v_tau, v_x0, v_t_end,
+                    v_dt_ref,
+                    sorted(set(l_ref_conv_dts), reverse=True),
+                )
+            )
+
         # ── Classical solver ──
-        print(f"  [Classical] Running method-of-steps RK45 solver...")
-        v_start_classical = time.time()
+        print(f"  [Classical] Running method-of-steps RK45 solver (max_step={v_dt_fine})...")
+        t0 = time.perf_counter()
         v_t_classical, v_x_classical = f_solve_mackey_glass_classical(
             p_beta=v_beta, p_gamma=v_gamma, p_n=v_n, p_tau=v_tau,
             p_x0=v_x0, p_t_end=v_t_end, p_dt=v_dt_fine,
         )
-        v_wall_classical = time.time() - v_start_classical
+        v_wall_classical = float(time.perf_counter() - t0)
         print(f"  [Classical] Done in {v_wall_classical:.2f}s, {len(v_t_classical)} points")
 
-        # High-accuracy reference (fixed-step RK4 at very fine dt)
-        v_dt_ref = 0.001
-        print(f"  [Reference] Generating high-accuracy RK4 reference (dt={v_dt_ref})...")
+        # High-accuracy reference (fixed-step RK4)
+        print(f"  [Reference] Generating fixed-step RK4 reference (dt={v_dt_ref})...")
+        t0 = time.perf_counter()
         v_t_ref, v_x_ref = f_solve_mackey_glass_rk4_fixed(
             p_beta=v_beta, p_gamma=v_gamma, p_n=v_n, p_tau=v_tau,
             p_x0=v_x0, p_t_end=v_t_end, p_dt=v_dt_ref,
         )
+        v_wall_ref_rk4 = float(time.perf_counter() - t0)
 
-        # Metrics for classical solver vs fine reference
+        t0 = time.perf_counter()
         v_interp_classical = interp1d(
             v_t_classical, v_x_classical, kind="cubic", fill_value="extrapolate",
         )
         v_x_classical_at_ref = v_interp_classical(v_t_ref)
+        v_wall_interp_cl = float(time.perf_counter() - t0)
+
         d_metrics_classical = f_compute_metrics(v_x_ref, v_x_classical_at_ref)
         print(f"  [Classical] MSE={d_metrics_classical['mse']:.2e}, "
               f"rel $\\ell^2_N$={d_metrics_classical['rel_l2']:.6f}")
@@ -2255,7 +2557,8 @@ def main():
         d_pinn_result = None
         d_metrics_pinn = {"mse": np.nan, "rel_l2": np.nan, "max_abs_err": np.nan}
         d_params_pinn = {}
-        v_wall_pinn = 0.0
+        v_wall_pinn_train = 0.0
+        v_wall_pinn_infer = 0.0
 
         if not v_args.skip_pinn:
             print(f"  [PINN] Training PINN (n={v_n})...")
@@ -2268,7 +2571,8 @@ def main():
                     p_junction_t_ref=v_t_ref,
                     p_junction_x_ref=v_x_ref,
                 )
-                v_wall_pinn = d_pinn_result["wall_time"]
+                v_wall_pinn_train = float(d_pinn_result.get("wall_time_train", d_pinn_result["wall_time"]))
+                v_wall_pinn_infer = float(d_pinn_result.get("wall_time_infer", 0.0))
 
                 v_x_pinn_fine = d_pinn_result.get("u_pred_metric_ref")
                 if v_x_pinn_fine is not None:
@@ -2287,9 +2591,11 @@ def main():
                     )
                 d_params_pinn = d_pinn_result["params"]
 
-                print(f"  [PINN] MSE={d_metrics_pinn['mse']:.2e}, "
-                      f"rel $\\ell^2_N$={d_metrics_pinn['rel_l2']:.6f}, "
-                      f"Wall time={v_wall_pinn:.1f}s")
+                print(
+                    f"  [PINN] MSE={d_metrics_pinn['mse']:.2e}, "
+                    f"rel $\\ell^2_N$={d_metrics_pinn['rel_l2']:.6f}, "
+                    f"train={v_wall_pinn_train:.1f}s, infer(stitch)={v_wall_pinn_infer:.3f}s",
+                )
                 print(f"  [PINN] Identified params: {d_params_pinn}")
             except Exception as e:
                 print(f"  [PINN] Training failed: {e}")
@@ -2298,9 +2604,52 @@ def main():
 
         d_params_true = {"beta": v_beta, "gamma": v_gamma, "n": v_n, "tau": v_tau}
 
+        v_seg_edges = [0.0]
+        while v_seg_edges[-1] + 50.0 < v_t_end - 1e-9:
+            v_seg_edges.append(v_seg_edges[-1] + 50.0)
+        v_seg_edges.append(float(v_t_end))
+        d_timing = {
+            "ref_rk4_gen_s": v_wall_ref_rk4,
+            "classical_solve_s": v_wall_classical,
+            "classical_interp_to_ref_s": v_wall_interp_cl,
+            "pinn_train_s": v_wall_pinn_train,
+            "pinn_infer_stitch_s": v_wall_pinn_infer,
+        }
+
+        d_valid_cl: Dict[str, float] = {}
+        d_valid_pn: Dict[str, float] = {}
+        d_seg_cl: Dict[str, float] = {}
+        d_seg_pn: Dict[str, float] = {}
+        d_attr_cl: Dict[str, Any] = {}
+        d_attr_pn: Dict[str, Any] = {}
+
+        if not v_args.no_extended_metrics:
+            d_valid_cl = f_first_exceedance_times(
+                v_t_ref, v_x_ref, v_x_classical_at_ref, l_valid_thr,
+            )
+            d_seg_cl = f_segment_mse_table(v_t_ref, v_x_ref, v_x_classical_at_ref, v_seg_edges)
+            d_attr_cl = f_attractor_metrics_bundle(
+                v_t_ref, v_x_ref, v_x_classical_at_ref, v_tau, v_dt_ref,
+            )
+            v_x_pinn_on_ref = None
+            if d_pinn_result and d_pinn_result.get("u_pred_metric_ref") is not None:
+                v_x_pinn_on_ref = np.asarray(d_pinn_result["u_pred_metric_ref"])[:, 0]
+            elif d_pinn_result:
+                v_x_pinn_on_ref = np.full_like(v_x_ref, np.nan)
+            if v_x_pinn_on_ref is not None and np.any(np.isfinite(v_x_pinn_on_ref)):
+                d_valid_pn = f_first_exceedance_times(
+                    v_t_ref, v_x_ref, v_x_pinn_on_ref, l_valid_thr,
+                )
+                d_seg_pn = f_segment_mse_table(v_t_ref, v_x_ref, v_x_pinn_on_ref, v_seg_edges)
+                d_attr_pn = f_attractor_metrics_bundle(
+                    v_t_ref, v_x_ref, v_x_pinn_on_ref, v_tau, v_dt_ref,
+                )
+
         d_all_results[v_n] = {
             "t_ref": v_t_ref,
             "x_ref": v_x_ref,
+            "ref_dt": v_dt_ref,
+            "classical_dt": v_dt_fine,
             "t_classical": v_t_classical,
             "x_classical": v_x_classical,
             "metrics_classical": d_metrics_classical,
@@ -2312,16 +2661,27 @@ def main():
             "metrics_pinn": d_metrics_pinn,
             "params_pinn": d_params_pinn,
             "params_true": d_params_true,
-            "wall_time_pinn": v_wall_pinn,
+            "wall_time_pinn": v_wall_pinn_train,
+            "wall_time_pinn_train": v_wall_pinn_train,
+            "wall_time_pinn_infer": v_wall_pinn_infer,
             "tau": v_tau,
             "loss_history": d_pinn_result["loss_history"] if d_pinn_result else [],
             "data_loss_history": d_pinn_result["data_loss_history"] if d_pinn_result else [],
             "physics_loss_history": d_pinn_result["physics_loss_history"] if d_pinn_result else [],
+            "timing": d_timing,
+            "runtime_env": v_runtime_env,
+            "valid_prediction_time_classical": d_valid_cl,
+            "valid_prediction_time_pinn": d_valid_pn,
+            "segment_mse_classical": d_seg_cl,
+            "segment_mse_pinn": d_seg_pn,
+            "attractor_metrics_classical": d_attr_cl,
+            "attractor_metrics_pinn": d_attr_pn,
         }
 
         # Per-n figure
         if d_pinn_result is not None:
             v_fig_path = os.path.join(v_args.output_dir, f"mackey_glass_n{v_n:g}_comparison.png")
+            t_fig0 = time.perf_counter()
             f_create_mglass_figure(
                 p_t_ref=v_t_ref,
                 p_x_ref=v_x_ref,
@@ -2344,6 +2704,19 @@ def main():
                 p_data_loss_history=d_pinn_result["data_loss_history"],
                 p_physics_loss_history=d_pinn_result["physics_loss_history"],
             )
+            t_plot_total += time.perf_counter() - t_fig0
+
+    if v_args.reference_convergence and l_ref_convergence_rows:
+        v_csv_conv = os.path.join(v_args.output_dir, "reference_convergence.csv")
+        with open(v_csv_conv, "w", newline="") as fh:
+            w = csv.DictWriter(
+                fh,
+                fieldnames=["n", "dt", "mse_vs_finest", "rel_l2_vs_finest", "max_abs_vs_finest"],
+            )
+            w.writeheader()
+            for row in l_ref_convergence_rows:
+                w.writerow(row)
+        print(f"\nWrote {v_csv_conv}")
 
     # Multi-n summary
     if len(d_all_results) > 1 and any(
@@ -2368,19 +2741,33 @@ def main():
         pickle.dump(d_all_results, fh, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"\nRaw results saved to: {v_pkl_path}")
 
+    v_manifest = {
+        "output_dir": v_args.output_dir,
+        "classical_dt": v_dt_fine,
+        "ref_dt": v_dt_ref,
+        "config_data_dt": v_dt_cfg,
+        "plotting_s": t_plot_total,
+        "runtime_env": v_runtime_env,
+        "argv": sys.argv,
+    }
+    with open(os.path.join(v_args.output_dir, "run_manifest.json"), "w") as fh:
+        json.dump(v_manifest, fh, indent=2)
+    print(f"Wrote {os.path.join(v_args.output_dir, 'run_manifest.json')}")
+
     # Print summary
     print("\n" + "=" * 80)
     print("SUMMARY")
     print("=" * 80)
-    print(f"{'n':>8} | {'Classical MSE':>14} | {'PINN MSE':>14} | {'Classical Time':>14} | {'PINN Time':>14}")
+    print(f"{'n':>8} | {'Cl MSE':>14} | {'PINN MSE':>14} | {'Cl s':>8} | {'train s':>10} | {'infer s':>9}")
     print("-" * 80)
     for v_n in sorted(d_all_results.keys()):
         d_r = d_all_results[v_n]
         print(
             f"{v_n:8g} | {d_r['metrics_classical']['mse']:14.2e} | "
             f"{d_r['metrics_pinn']['mse']:14.2e} | "
-            f"{d_r['wall_time_classical']:13.1f}s | "
-            f"{d_r['wall_time_pinn']:13.1f}s"
+            f"{d_r['wall_time_classical']:8.2f} | "
+            f"{d_r['wall_time_pinn']:10.1f} | "
+            f"{d_r.get('wall_time_pinn_infer', 0.0):9.4f}"
         )
     print("=" * 80)
     print(f"\nAll outputs in: {v_args.output_dir}/")
