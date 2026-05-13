@@ -28,19 +28,33 @@ are written under ``mglass_comparison/results/`` (see ``--output-dir``).
     ``config_mackey_glass_t100_windowed.yaml`` is the shorter ``[0,100]`` windowed benchmark.
     Window construction is in ``f_build_time_windows``.
 
-Re-export the 3D overlay (four POVs + ``*_2x2.png`` grid) from a finished run::
+Batch ablations (junction mode, supervision orbit, coupled delay gradients, curriculum,
+``n_lbfgs`` overrides) load YAML manifests via ``run_ablation_matrix.py`` and merge
+dictionaries using ``f_deep_merge_config``.
 
-    python run_mglass_comparison.py --only-3d-overlay \\
+Re-export overlay or heatmap from a finished run (see ``--only-3d-overlay`` /
+``--only-heatmap``)::
+
+    python run_mglass_comparison.py --only-heatmap \\
         --output-dir results/my_run --n-values 10
+
+For a Navier-Stokes-style multi-term loss vs iteration figure (plus IC-band
+breakdown and a three-stack IC/modifiers plot), use ``--only-loss-convergence``.
+
+``--only-heatmap`` reads ``mglass_run.pkl`` (same as ``--only-3d-overlay``).
+If ``OUTPUT_DIR/mglass_run.pkl`` is missing but a nested
+``mglass_comparison/<relative-output>/mglass_run.pkl`` exists (duplicate bundle folder),
+it is picked up automatically; otherwise use ``--from-pkl``.
 
 Writes ``n10_3d_overlay.png``, ``n10_3d_overlay_pov_*.png`` for the other cameras,
 and ``n10_3d_overlay_2x2.png`` (PDFs too unless ``--no-pdf``).
 
-``mglass_run.pkl`` must exist under ``--output-dir`` unless you pass ``--from-pkl``.
+``mglass_run.pkl`` is resolved as above unless you pass an explicit ``--from-pkl`` path.
 """
 
 import os
 import random
+import re
 
 # ROCm override MUST be set before importing torch
 os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
@@ -54,6 +68,7 @@ import pickle
 import platform
 import argparse
 import csv
+import glob
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -111,6 +126,78 @@ def f_resolve_bundle_output_dir(raw: str) -> str:
     if p.is_absolute():
         return str(p.resolve())
     return str((MGLASS_COMPARISON_ROOT / p).resolve())
+
+
+def f_resolve_mglass_run_pkl_for_export(
+    resolved_output_dir: str,
+    from_pkl: Optional[str],
+    mode_label: str,
+) -> Tuple[str, str]:
+    """Locate ``mglass_run.pkl`` for export-only CLI modes.
+
+    Relative ``--output-dir`` resolves under ``MGLASS_COMPARISON_ROOT``. Some runs
+    store artifacts under ``mglass_comparison/results/…`` inside that bundle
+    (duplicate ``mglass_comparison`` segment). When the default pickle is missing,
+    we try that nested folder before exiting with a hint.
+    """
+    v_od = Path(resolved_output_dir).resolve()
+    if from_pkl is not None:
+        v_manual = Path(from_pkl).expanduser()
+        if not v_manual.is_absolute():
+            v_manual = (MGLASS_COMPARISON_ROOT / v_manual).resolve()
+        else:
+            v_manual = v_manual.resolve()
+        if not v_manual.is_file():
+            raise SystemExit(f"{mode_label}: pickle not found (--from-pkl): {v_manual}")
+        return str(v_manual), str(v_manual.parent)
+
+    v_prim = v_od / "mglass_run.pkl"
+    if v_prim.is_file():
+        return str(v_prim), str(v_od)
+
+    v_rel_od: Optional[Path]
+    try:
+        v_rel_od = v_od.relative_to(MGLASS_COMPARISON_ROOT.resolve())
+    except ValueError:
+        v_rel_od = None
+
+    if v_rel_od is not None:
+        v_nested_od = (MGLASS_COMPARISON_ROOT / "mglass_comparison" / v_rel_od).resolve()
+        v_nested = v_nested_od / "mglass_run.pkl"
+        if v_nested.is_file():
+            print(
+                f"{mode_label}: using nested pickle ({v_nested}) "
+                f"(not present at {v_prim})",
+            )
+            return str(v_nested), str(v_nested_od)
+
+    v_hints = ""
+    if v_rel_od is not None:
+        v_hints = (
+            "\nRuns may live under a duplicated bundle folder.\nTry either:\n"
+            f"  --output-dir mglass_comparison/{v_rel_od.as_posix()}\n"
+            "  --from-pkl /absolute/path/to/mglass_run.pkl\n"
+        )
+    else:
+        v_hints = "\nPass an absolute pickle path:\n  --from-pkl /path/to/mglass_run.pkl\n"
+    raise SystemExit(f"{mode_label}: pickle not found: {v_prim}{v_hints}")
+
+
+def f_deep_merge_config(base: Any, patch: Any) -> Any:
+    """Recursively overlay dict ``patch`` onto ``copy.deepcopy(base)``."""
+    if not isinstance(patch, dict):
+        return copy.deepcopy(patch)
+    out: Dict[str, Any] = (
+        copy.deepcopy(base) if isinstance(base, dict) else {}
+    )
+    if not isinstance(out, dict):
+        out = {}
+    for k, v in patch.items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = f_deep_merge_config(out[k], v)
+        else:
+            out[k] = copy.deepcopy(v)
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -358,11 +445,18 @@ def f_eval_delayed(
     history_val: float,
     prev_model: Optional["MackeyGlassPINN"] = None,
     win_t0: float = 0.0,
+    detach_delayed_argument: bool = True,
 ) -> torch.Tensor:
     """Evaluate x(t - tau).
 
     For time-domain decomposition: if t-tau falls before the current window
     start (win_t0), use prev_model if available, else history constant.
+
+    When ``detach_delayed_argument`` is True (default PINN recipe), gradients
+    w.r.t. model parameters omit the pathway through delayed values in the
+    current window (``model(t-delay)``). When False (``coupled`` ablation),
+    gradients backpropagate through delayed arguments as well when autograd is
+    active on ``t``.
     """
     t_delayed = t - tau
     result = torch.full_like(t_delayed, history_val)
@@ -379,7 +473,12 @@ def f_eval_delayed(
 
     idx_cur = mask_cur.nonzero(as_tuple=True)[0]
     if idx_cur.numel() > 0:
-        result[idx_cur, :] = model(t_delayed[idx_cur, :].detach())
+        t_arg = (
+            t_delayed[idx_cur, :].detach()
+            if detach_delayed_argument
+            else t_delayed[idx_cur, :]
+        )
+        result[idx_cur, :] = model(t_arg)
 
     return result
 
@@ -387,6 +486,7 @@ def f_eval_delayed(
 def f_compute_residual_abs(
     model, t_pts, beta, gamma, n_hill, tau, x0,
     prev_model=None, win_t0=0.0,
+    detach_delayed_argument: bool = True,
 ):
     """Compute |dx/dt - rhs| for adaptive residual sampling."""
     t_eval = t_pts.detach().clone().requires_grad_(True)
@@ -396,7 +496,10 @@ def f_compute_residual_abs(
         grad_outputs=torch.ones_like(x_eval),
         create_graph=False, retain_graph=False,
     )[0]
-    x_tau = f_eval_delayed(model, t_eval.detach(), tau, x0, prev_model, win_t0)
+    x_tau = f_eval_delayed(
+        model, t_eval.detach(), tau, x0, prev_model, win_t0,
+        detach_delayed_argument=detach_delayed_argument,
+    )
     rhs = beta * x_tau / (1.0 + torch.abs(x_tau) ** n_hill) - gamma * x_eval
     return torch.abs(dx_dt - rhs).detach().squeeze(1)
 
@@ -406,6 +509,7 @@ def f_sample_collocation(
     beta, gamma, n_hill, tau, x0,
     adaptive, pool_mult, top_frac,
     prev_model=None, win_t0=0.0,
+    detach_delayed_argument: bool = True,
 ):
     """Sample collocation points, optionally with adaptive residual focus."""
     if not adaptive:
@@ -413,8 +517,11 @@ def f_sample_collocation(
 
     pool_n = n_ode * pool_mult
     t_pool = torch.rand(pool_n, 1, device=device) * (t_hi - t_lo) + t_lo
-    res = f_compute_residual_abs(model, t_pool, beta, gamma, n_hill, tau, x0,
-                                  prev_model, win_t0)
+    res = f_compute_residual_abs(
+        model, t_pool, beta, gamma, n_hill, tau, x0,
+        prev_model, win_t0,
+        detach_delayed_argument=detach_delayed_argument,
+    )
     n_focus = max(1, int(round(n_ode * top_frac)))
     n_focus = min(n_focus, n_ode)
     top_idx = torch.topk(res, k=n_focus, largest=True).indices
@@ -455,8 +562,25 @@ def f_mackey_glass_loss(
     w_ic: float = 10.0,
     ic_t: Optional[torch.Tensor] = None,
     ic_x: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute total PINN loss for Mackey-Glass DDE."""
+    detach_delayed_argument: bool = True,
+) -> Tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor,
+    torch.Tensor, torch.Tensor, torch.Tensor,
+    torch.Tensor, torch.Tensor,
+]:
+    """Compute total PINN loss for Mackey-Glass DDE.
+
+    Returns scalar unweighted MSEs::
+        total,
+        ``loss_data``, ``loss_phy``,
+        ``loss_hist`` (mean over prescribed history samples on ``[-\\tau, 0]``),
+        ``loss_ic`` (junction anchoring),
+        ``loss_hist_far`` / ``mid`` / ``near0`` (means over equal index thirds
+        of those history samples along ``-\\tau \\to 0^-`` --- the scalar analogue
+        of plotting multiple spatial IC residuals in fluid PINNs).
+
+    With no prescribed history tensor, history terms are zeros.
+    """
     t_ode = t_ode.requires_grad_(True)
     x_pred = model(t_ode)
     dx_dt = torch.autograd.grad(
@@ -465,15 +589,36 @@ def f_mackey_glass_loss(
         create_graph=True, retain_graph=True,
     )[0]
 
-    x_tau = f_eval_delayed(model, t_ode.detach(), tau, x0, prev_model, win_t0)
+    t_for_delay = (
+        t_ode.detach() if detach_delayed_argument else t_ode
+    )
+    x_tau = f_eval_delayed(
+        model, t_for_delay, tau, x0, prev_model, win_t0,
+        detach_delayed_argument=detach_delayed_argument,
+    )
     rhs = beta * x_tau / (1.0 + torch.abs(x_tau) ** n_hill) - gamma * x_pred
     loss_phy = torch.mean((dx_dt - rhs) ** 2)
 
     x_data_pred = model(t_data)
     loss_data = torch.mean((x_data_pred - x_data) ** 2)
 
-    loss_hist = torch.mean((model(t_hist) - x0) ** 2) if t_hist.numel() > 0 else \
-        torch.tensor(0.0, device=t_ode.device)
+    lh_far = torch.tensor(0.0, dtype=t_ode.dtype, device=t_ode.device)
+    lh_mid = torch.tensor(0.0, dtype=t_ode.dtype, device=t_ode.device)
+    lh_near0 = torch.tensor(0.0, dtype=t_ode.dtype, device=t_ode.device)
+    loss_hist = torch.tensor(0.0, device=t_ode.device)
+
+    if t_hist.numel() > 0:
+        err_sq = ((model(t_hist) - x0) ** 2).reshape(-1)
+        loss_hist = err_sq.mean()
+        n_pts = int(err_sq.numel())
+        if n_pts >= 3:
+            i1 = n_pts // 3
+            i2 = 2 * (n_pts // 3)
+            lh_far = err_sq[:i1].mean()
+            lh_mid = err_sq[i1:i2].mean()
+            lh_near0 = err_sq[i2:].mean()
+        else:
+            lh_far = lh_mid = lh_near0 = loss_hist
 
     loss_ic = torch.tensor(0.0, device=t_ode.device)
     if ic_t is not None and ic_x is not None:
@@ -481,7 +626,10 @@ def f_mackey_glass_loss(
 
     total = (w_data * loss_data + w_phy * loss_phy
              + w_hist * loss_hist + w_ic * loss_ic)
-    return total, loss_data, loss_phy, loss_hist
+    return (
+        total, loss_data, loss_phy,
+        loss_hist, loss_ic, lh_far, lh_mid, lh_near0,
+    )
 
 
 def _f_curriculum_frac(epoch, n_epochs, start_frac=0.1, power=2.0):
@@ -528,6 +676,210 @@ def f_build_time_windows(
     return windows
 
 
+def _f_training_plot_arrays_from_ckpt(
+    ckpt: Dict[str, Any],
+    n_rec: int,
+) -> Tuple[List[str], List[float], List[float], List[float], List[float]]:
+    """Recover per-step phase + weighted-loss terms saved on a window checkpoint.
+
+    Older checkpoints omit ``training_plot_trace``; synthesize optimizer phase from
+    ``planned_{n_adam,n_lbfgs}`` when those sum to ``n_rec``, and emit NaNs for
+    weighted-term series that were never logged.
+    """
+    tp_any = ckpt.get("training_plot_trace")
+    nan4 = tuple([float("nan")] * n_rec for _ in range(4))
+
+    def _phase_from_counts(pa_i: int, pl_i: int) -> Optional[List[str]]:
+        if pa_i >= 0 and pl_i >= 0 and pa_i + pl_i == n_rec:
+            return ["adam"] * pa_i + ["lbfgs"] * pl_i
+        return None
+
+    if isinstance(tp_any, dict):
+        tp = tp_any
+        lp = tp.get("optimizer_phase") or []
+        wd = tp.get("weighted_data_term") or []
+        wp = tp.get("weighted_phys_term") or []
+        wh = tp.get("weighted_hist_term") or []
+        wi = tp.get("weighted_ic_term") or []
+        if (
+            len(lp) == n_rec
+            and len(wd) == n_rec
+            and len(wp) == n_rec
+            and len(wh) == n_rec
+            and len(wi) == n_rec
+        ):
+            return (
+                [str(x) for x in lp],
+                [float(x) for x in wd],
+                [float(x) for x in wp],
+                [float(x) for x in wh],
+                [float(x) for x in wi],
+            )
+        pa = int(tp.get("planned_n_adam", ckpt.get("planned_n_adam", -1)))
+        pl = int(tp.get("planned_n_lbfgs", ckpt.get("planned_n_lbfgs", -1)))
+        ph = _phase_from_counts(pa, pl)
+        if ph is not None:
+            c0, c1, c2, c3 = nan4
+            return ph, list(c0), list(c1), list(c2), list(c3)
+
+    pa = int(ckpt.get("planned_n_adam", -1))
+    pl = int(ckpt.get("planned_n_lbfgs", -1))
+    ph = _phase_from_counts(pa, pl)
+    if ph is not None:
+        c0, c1, c2, c3 = nan4
+        return ph, list(c0), list(c1), list(c2), list(c3)
+    c0, c1, c2, c3 = nan4
+    return ["unknown_stage"] * n_rec, list(c0), list(c1), list(c2), list(c3)
+
+
+def _f_trace_float_series_from_ckpt(
+    ckpt: Dict[str, Any],
+    key: str,
+    n_rec: int,
+) -> List[float]:
+    """Load a numeric per-step trace from checkpoint (or NaNs if missing/old)."""
+    tp = ckpt.get("training_plot_trace")
+    if isinstance(tp, dict):
+        xs = tp.get(key)
+        if isinstance(xs, list) and len(xs) == n_rec:
+            out: List[float] = []
+            for z in xs:
+                try:
+                    out.append(float(z))
+                except (TypeError, ValueError):
+                    out.append(float("nan"))
+            return out
+    return [float("nan")] * int(n_rec)
+
+
+_MERGE_EXTENDED_CKPT_FIELDS: Tuple[str, ...] = (
+    "history_loss_history",
+    "ic_loss_history",
+    "hist_loss_far_history",
+    "hist_loss_mid_history",
+    "hist_loss_near0_history",
+)
+
+
+def _f_sorted_window_checkpoint_paths(p_ck_dir: str) -> List[str]:
+    if not os.path.isdir(p_ck_dir):
+        return []
+
+    def _wid(pth: str) -> int:
+        m = re.search(r"window_(\d+)\.pt$", os.path.basename(pth))
+        return int(m.group(1)) if m else 10**9
+
+    return sorted(glob.glob(os.path.join(p_ck_dir, "window_*.pt")), key=_wid)
+
+
+def f_try_merge_extended_histories_from_checkpoints(
+    p_output_dir: str,
+    p_n: float,
+    p_total_iterations: int,
+) -> Dict[str, List[float]]:
+    """Concatenate per-window ``checkpoint`` loss traces when pickles omit fields.
+
+    Returns a dict keyed like ``history_loss_history`` for every field where **all**
+    ``window_*.pt`` shards contain aligned lists matching that window's ``loss_history``
+    length, and concatenated length equals ``p_total_iterations``. Empty dict if
+    nothing can be reconstructed (common for checkpoints from older trainers).
+    """
+    ck_dir = os.path.join(os.path.expanduser(str(p_output_dir)), f"checkpoints_n{p_n:g}")
+    out: Dict[str, List[float]] = {}
+    if int(p_total_iterations) <= 0:
+        return out
+
+    paths = _f_sorted_window_checkpoint_paths(ck_dir)
+    if not paths:
+        return out
+
+    def _flt_list(seq: Sequence[Any]) -> List[float]:
+        z: List[float] = []
+        for x in seq:
+            try:
+                z.append(float(x))
+            except (TypeError, ValueError):
+                z.append(float("nan"))
+        return z
+
+    for field in _MERGE_EXTENDED_CKPT_FIELDS:
+        acc: List[float] = []
+        ok_run = True
+        for wp in paths:
+            try:
+                ck = torch.load(wp, map_location="cpu", weights_only=False)
+            except Exception:
+                ok_run = False
+                break
+            n_seg = len(ck.get("loss_history") or [])
+            if n_seg <= 0:
+                ok_run = False
+                break
+            chunk = ck.get(field)
+            if not isinstance(chunk, list) or len(chunk) != n_seg:
+                ok_run = False
+                break
+            acc.extend(_flt_list(chunk))
+        if ok_run and len(acc) == int(p_total_iterations):
+            out[field] = acc
+    return out
+
+
+def f_describe_extended_history_gap(
+    p_output_dir: str,
+    p_n: float,
+) -> Optional[str]:
+    """Explain why pickles / checkpoints may lack MG history + junction losses."""
+    ck_dir = os.path.join(os.path.expanduser(str(p_output_dir)), f"checkpoints_n{p_n:g}")
+    paths = _f_sorted_window_checkpoint_paths(ck_dir)
+    if not paths:
+        return (
+            f"No folder ``checkpoints_n{p_n:g}/`` beside this pickle — extended "
+            "loss traces cannot be reconstructed from checkpoints."
+        )
+    try:
+        ck0 = torch.load(paths[0], map_location="cpu", weights_only=False)
+    except Exception as exc:
+        return f"Could not read {paths[0]}: {exc}"
+    if ck0.get("history_loss_history") is None and ck0.get("ic_loss_history") is None:
+        return (
+            r"The first shard ``window_0.pt`` has no ``history_loss_history`` / "
+            r"``ic_loss_history`` (saved with older code). Delete the folder ``"
+            f"{ck_dir}`` or pass ``--ignore-pinn-checkpoints`` once during a fresh "
+            "PINN pass, regenerate ``mglass_run.pkl``, then re-run this export."
+        )
+    return (
+        r"Checkpoint shards declare extended histories but their concatenated length "
+        "does not match ``loss_history`` in the pickle — retrain PINN into this "
+        "output directory with the current script."
+    )
+
+
+def f_shard0_extended_hist_absent(p_output_dir: str, p_n: float) -> bool:
+    """True iff ``window_0.pt`` has neither history nor junction loss lists."""
+    ck_dir = os.path.join(os.path.expanduser(str(p_output_dir)), f"checkpoints_n{p_n:g}")
+    paths = _f_sorted_window_checkpoint_paths(ck_dir)
+    if not paths:
+        return False
+    try:
+        ck0 = torch.load(paths[0], map_location="cpu", weights_only=False)
+    except Exception:
+        return False
+    return (
+        ck0.get("history_loss_history") is None
+        and ck0.get("ic_loss_history") is None
+    )
+
+
+def _f_loss_trace_usable(seq: Optional[Sequence[float]], expected: int) -> bool:
+    if seq is None or int(expected) <= 0:
+        return False
+    try:
+        return len(seq) == int(expected)
+    except TypeError:
+        return False
+
+
 def _f_train_single_window(
     model, device, d_config,
     v_t_train_np, v_x_train_np,
@@ -558,6 +910,17 @@ def _f_train_single_window(
     v_resample_every = int(d_config["training"].get("resample_every", 500))
     v_n_lbfgs = int(d_config["training"].get("n_lbfgs", 500))
 
+    v_ablation = (
+        ((d_config.get("training") or {}).get("ablation")) or {}
+    )
+    if "curriculum" in v_ablation and v_ablation["curriculum"] is not None:
+        v_curriculum = bool(v_ablation["curriculum"])
+    if v_ablation.get("n_lbfgs") is not None:
+        v_n_lbfgs = int(v_ablation["n_lbfgs"])
+
+    _dg = str(v_ablation.get("delay_grad", "detach")).strip().lower()
+    v_detach_delay = _dg != "coupled"
+
     mask_tr = (v_t_train_np >= win_t0) & (v_t_train_np <= win_t1)
     t_data = torch.tensor(v_t_train_np[mask_tr], dtype=torch.float32, device=device).unsqueeze(1)
     x_data = torch.tensor(v_x_train_np[mask_tr], dtype=torch.float32, device=device).unsqueeze(1)
@@ -576,6 +939,21 @@ def _f_train_single_window(
     sched = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=v_n_adam, eta_min=1e-6)
 
     l_loss, l_data_l, l_phy_l = [], [], []
+    l_hist_l: List[float] = []
+    l_ic_l: List[float] = []
+    l_h_far_l: List[float] = []
+    l_h_mid_l: List[float] = []
+    l_h_near_l: List[float] = []
+    l_phase: List[str] = []
+    l_w_data_term: List[float] = []
+    l_w_phys_term: List[float] = []
+    l_w_hist_term: List[float] = []
+    l_w_hist_far_term: List[float] = []
+    l_w_hist_mid_term: List[float] = []
+    l_w_hist_near0_term: List[float] = []
+    l_w_ic_term: List[float] = []
+    l_phys_weight_fraction: List[float] = []
+    l_curriculum_time_frac: List[float] = []
     start = time.time()
 
     use_adaptive = False
@@ -588,6 +966,7 @@ def _f_train_single_window(
             frac = _f_curriculum_frac(ep, v_n_adam, start_frac=0.15, power=2.0)
             t_hi_cur = win_t0 + (win_t1 - win_t0) * frac
         else:
+            frac = 1.0
             t_hi_cur = win_t1
 
         if v_adaptive and ep > v_n_adam // 5 and (ep == 1 or ep % v_resample_every == 0):
@@ -598,6 +977,7 @@ def _f_train_single_window(
             v_beta, v_gamma, v_n_hill, v_tau, v_x0,
             use_adaptive, pool_mult=3, top_frac=0.5,
             prev_model=prev_model, win_t0=win_t0,
+            detach_delayed_argument=v_detach_delay,
         )
 
         w_phy_eff = v_w_phy
@@ -612,12 +992,28 @@ def _f_train_single_window(
                 data_cur = t_data[m]
                 xdata_cur = x_data[m]
 
-        loss, ld, lp, lh = f_mackey_glass_loss(
+        loss, ld, lp, lh, lic, lh_f, lh_m, lh_n = f_mackey_glass_loss(
             model, t_ode, t_hist, data_cur, xdata_cur,
             v_beta, v_gamma, v_n_hill, v_tau, v_x0,
             v_w_data, w_phy_eff, v_w_hist,
             prev_model, win_t0, v_w_ic, ic_t, ic_x,
+            detach_delayed_argument=v_detach_delay,
         )
+
+        with torch.no_grad():
+            l_phase.append("adam")
+            l_w_data_term.append(float(v_w_data * ld.detach()))
+            l_w_phys_term.append(float(w_phy_eff * lp.detach()))
+            l_w_hist_term.append(float(v_w_hist * lh.detach()))
+            l_w_hist_far_term.append(float(v_w_hist * lh_f.detach()))
+            l_w_hist_mid_term.append(float(v_w_hist * lh_m.detach()))
+            l_w_hist_near0_term.append(float(v_w_hist * lh_n.detach()))
+            l_w_ic_term.append(float(v_w_ic * lic.detach()))
+            if v_w_phy > 1e-30:
+                l_phys_weight_fraction.append(float(w_phy_eff / v_w_phy))
+            else:
+                l_phys_weight_fraction.append(1.0)
+            l_curriculum_time_frac.append(float(frac))
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -627,6 +1023,11 @@ def _f_train_single_window(
         l_loss.append(float(loss.item()))
         l_data_l.append(float(ld.item()))
         l_phy_l.append(float(lp.item()))
+        l_hist_l.append(float(lh.item()))
+        l_ic_l.append(float(lic.item()))
+        l_h_far_l.append(float(lh_f.item()))
+        l_h_mid_l.append(float(lh_m.item()))
+        l_h_near_l.append(float(lh_n.item()))
 
         if ep % v_log_every == 0 or ep == 1:
             el = time.time() - start
@@ -634,7 +1035,7 @@ def _f_train_single_window(
             print(
                 f"  [{window_label}] {ep:5d}/{v_n_adam} | Loss {loss.item():.3e} | "
                 f"data {ld.item():.3e} | phys {lp.item():.3e} | "
-                f"lh {lh.item():.3e}{cur_str} | {el:.1f}s"
+                f"hist {lh.item():.3e} | ic {lic.item():.3e}{cur_str} | {el:.1f}s"
             )
 
     # L-BFGS refinement
@@ -647,27 +1048,47 @@ def _f_train_single_window(
             v_beta, v_gamma, v_n_hill, v_tau, v_x0,
             v_adaptive, pool_mult=3, top_frac=0.5,
             prev_model=prev_model, win_t0=win_t0,
+            detach_delayed_argument=v_detach_delay,
         )
         _cache: Dict[str, float] = {}
 
         for s in range(1, v_n_lbfgs + 1):
             def closure():
                 opt_lb.zero_grad()
-                lo, dd, pp, hh = f_mackey_glass_loss(
+                lo, dd, pp, lh, lic, lh_f, lh_m, lh_n = f_mackey_glass_loss(
                     model, t_ode_fix, t_hist, t_data, x_data,
                     v_beta, v_gamma, v_n_hill, v_tau, v_x0,
                     v_w_data, v_w_phy, v_w_hist,
                     prev_model, win_t0, v_w_ic, ic_t, ic_x,
+                    detach_delayed_argument=v_detach_delay,
                 )
                 lo.backward()
-                _cache.update(loss=float(lo.item()), data=float(dd.item()),
-                              phys=float(pp.item()))
+                _cache.update(
+                    loss=float(lo.item()), data=float(dd.item()),
+                    phys=float(pp.item()), hist=float(lh.item()), ic=float(lic.item()),
+                    hf=float(lh_f.item()), hm=float(lh_m.item()), hn=float(lh_n.item()),
+                )
                 return lo
 
             opt_lb.step(closure)
             l_loss.append(_cache.get("loss", float("nan")))
             l_data_l.append(_cache.get("data", float("nan")))
             l_phy_l.append(_cache.get("phys", float("nan")))
+            l_hist_l.append(_cache.get("hist", float("nan")))
+            l_ic_l.append(_cache.get("ic", float("nan")))
+            l_h_far_l.append(_cache.get("hf", float("nan")))
+            l_h_mid_l.append(_cache.get("hm", float("nan")))
+            l_h_near_l.append(_cache.get("hn", float("nan")))
+            l_phase.append("lbfgs")
+            l_w_data_term.append(float(v_w_data * _cache.get("data", float("nan"))))
+            l_w_phys_term.append(float(v_w_phy * _cache.get("phys", float("nan"))))
+            l_w_hist_term.append(float(v_w_hist * _cache.get("hist", float("nan"))))
+            l_w_hist_far_term.append(float(v_w_hist * _cache.get("hf", float("nan"))))
+            l_w_hist_mid_term.append(float(v_w_hist * _cache.get("hm", float("nan"))))
+            l_w_hist_near0_term.append(float(v_w_hist * _cache.get("hn", float("nan"))))
+            l_w_ic_term.append(float(v_w_ic * _cache.get("ic", float("nan"))))
+            l_phys_weight_fraction.append(1.0)
+            l_curriculum_time_frac.append(1.0)
 
             if s % 100 == 0 or s == 1:
                 el = time.time() - start
@@ -676,7 +1097,25 @@ def _f_train_single_window(
 
     wall = time.time() - start
     print(f"  [{window_label}] Done in {wall:.1f}s")
-    return l_loss, l_data_l, l_phy_l, wall
+    d_training_trace: Dict[str, Any] = {
+        "optimizer_phase": l_phase,
+        "weighted_data_term": l_w_data_term,
+        "weighted_phys_term": l_w_phys_term,
+        "weighted_hist_term": l_w_hist_term,
+        "weighted_hist_far_term": l_w_hist_far_term,
+        "weighted_hist_mid_term": l_w_hist_mid_term,
+        "weighted_hist_near0_term": l_w_hist_near0_term,
+        "weighted_ic_term": l_w_ic_term,
+        "physics_weight_fraction": l_phys_weight_fraction,
+        "curriculum_time_fraction": l_curriculum_time_frac,
+        "planned_n_adam": int(v_n_adam),
+        "planned_n_lbfgs": int(v_n_lbfgs),
+    }
+    return (
+        l_loss, l_data_l, l_phy_l, l_hist_l, l_ic_l,
+        l_h_far_l, l_h_mid_l, l_h_near_l, wall,
+        d_training_trace,
+    )
 
 
 def f_stitch_pinn_on_grid(
@@ -725,6 +1164,11 @@ def f_train_pinn_mackey_glass(
         v_seed = int(d_config.get("training", {}).get("random_seed", 1234))
     f_apply_training_seed(v_seed)
     print(f"  [PINN] Random seed: {v_seed}")
+    if d_config.get("_ignore_pinn_checkpoints"):
+        print(
+            "  [PINN] Ignoring resumed checkpoints (`--ignore-pinn-checkpoints`); "
+            "retraining every window.",
+        )
 
     v_beta = float(d_config["problem"]["beta_true"])
     v_gamma = float(d_config["problem"]["gamma_true"])
@@ -734,14 +1178,37 @@ def f_train_pinn_mackey_glass(
     v_t_end = float(d_config["data"]["t_total"])
     v_dt = float(d_config["data"]["dt"])
 
-    v_t_ref_np, v_x_ref_np = f_solve_mackey_glass_rk4_fixed(
+    v_ablation: Dict[str, Any] = (
+        ((d_config.get("training") or {}).get("ablation")) or {}
+    )
+
+    v_t_coarse_np, v_x_coarse_np = f_solve_mackey_glass_rk4_fixed(
         p_beta=v_beta, p_gamma=v_gamma, p_n=v_n_hill, p_tau=v_tau,
         p_x0=v_x0, p_t_end=v_t_end, p_dt=v_dt,
     )
+    ref_interp_coarse = interp1d(
+        v_t_coarse_np, v_x_coarse_np, kind="cubic", fill_value="extrapolate",
+    )
+
     v_n_train = int(d_config["data"]["training"]["n_points"])
-    v_stride = max(1, len(v_t_ref_np) // v_n_train)
-    v_t_train_np = v_t_ref_np[::v_stride]
-    v_x_train_np = v_x_ref_np[::v_stride]
+
+    sup_orbit = str(v_ablation.get("supervision_orbit", "coarse_dt")).strip().lower()
+    if sup_orbit == "fine_subsample":
+        if p_junction_t_ref is None or p_junction_x_ref is None:
+            raise ValueError(
+                "training.ablation.supervision_orbit=fine_subsample requires "
+                "p_junction_t_ref and p_junction_x_ref on the metric fine grid.",
+            )
+        v_fline = len(np.asarray(p_junction_t_ref, dtype=np.float64).ravel())
+        v_stride_fs = max(1, int(v_fline) // max(1, v_n_train))
+        v_ft = np.asarray(p_junction_t_ref, dtype=np.float64).ravel()
+        v_fx = np.asarray(p_junction_x_ref, dtype=np.float64).ravel()
+        v_t_train_np = v_ft[::v_stride_fs]
+        v_x_train_np = v_fx[::v_stride_fs]
+    else:
+        v_stride_cs = max(1, len(v_t_coarse_np) // max(1, v_n_train))
+        v_t_train_np = v_t_coarse_np[::v_stride_cs]
+        v_x_train_np = v_x_coarse_np[::v_stride_cs]
 
     device = f_select_device()
 
@@ -774,24 +1241,50 @@ def f_train_pinn_mackey_glass(
 
     v_start_train = time.perf_counter()
     all_loss, all_data_l, all_phy_l = [], [], []
+    all_hist_l: List[float] = []
+    all_ic_l: List[float] = []
+    all_hist_far_l: List[float] = []
+    all_hist_mid_l: List[float] = []
+    all_hist_near0_l: List[float] = []
+    all_segment_lengths: List[int] = []
+    all_phase: List[str] = []
+    all_win_ix: List[int] = []
+    all_w_data_term: List[float] = []
+    all_w_phys_term: List[float] = []
+    all_w_hist_term: List[float] = []
+    all_w_ic_term: List[float] = []
+    all_w_hist_far_term: List[float] = []
+    all_w_hist_mid_term: List[float] = []
+    all_w_hist_near0_term: List[float] = []
+    all_phys_weight_fraction: List[float] = []
+    all_curriculum_time_frac: List[float] = []
     models: List[Tuple[float, float, MackeyGlassPINN]] = []
     prev_model = None
 
-    ref_interp = interp1d(v_t_ref_np, v_x_ref_np, kind="cubic",
-                          fill_value="extrapolate")
-    junction_interp = ref_interp
     if p_junction_t_ref is not None and p_junction_x_ref is not None:
-        junction_interp = interp1d(
+        junction_interp_fine = interp1d(
             p_junction_t_ref, p_junction_x_ref, kind="cubic",
             fill_value="extrapolate",
         )
+    else:
+        junction_interp_fine = ref_interp_coarse
+
+    junction_mode = str(v_ablation.get("junction", "oracle_fine")).strip().lower()
+
+    v_lw_nom = (d_config.get("training") or {}).get("loss_weights") or {}
+    v_plan_lbfgs = int((d_config.get("training") or {}).get("n_lbfgs", 500))
+    if v_ablation.get("n_lbfgs") is not None:
+        v_plan_lbfgs = int(v_ablation["n_lbfgs"])
+    v_plan_adam = int(d_config["training"]["iterations"]["main"])
+    v_ramp_iters = int((d_config.get("training") or {}).get("physics_ramp_iters", 0))
 
     for wi, (wt0, wt1) in enumerate(windows):
         label = f"W{wi} [{wt0:.0f}-{wt1:.0f}]"
         ckpt_path = os.path.join(v_ckpt_dir, f"window_{wi}.pt")
 
         # Resume from checkpoint if available
-        if os.path.exists(ckpt_path):
+        if (not d_config.get("_ignore_pinn_checkpoints")
+                and os.path.exists(ckpt_path)):
             print(f"\n  ── {label} (loading checkpoint) ──")
             ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
             model = MackeyGlassPINN(
@@ -807,9 +1300,55 @@ def f_train_pinn_mackey_glass(
             model.eval()
             models.append((wt0, wt1, model))
             prev_model = model
+            n_rec = len(ckpt.get("loss_history", []))
             all_loss.extend(ckpt.get("loss_history", []))
             all_data_l.extend(ckpt.get("data_loss_history", []))
             all_phy_l.extend(ckpt.get("physics_loss_history", []))
+            all_hist_l.extend(
+                ckpt.get("history_loss_history")
+                or [0.0] * n_rec
+            )
+            all_ic_l.extend(
+                ckpt.get("ic_loss_history")
+                or [0.0] * n_rec
+            )
+            all_hist_far_l.extend(
+                ckpt.get("hist_loss_far_history")
+                or [0.0] * n_rec
+            )
+            all_hist_mid_l.extend(
+                ckpt.get("hist_loss_mid_history")
+                or [0.0] * n_rec
+            )
+            all_hist_near0_l.extend(
+                ckpt.get("hist_loss_near0_history")
+                or [0.0] * n_rec
+            )
+            all_segment_lengths.append(n_rec)
+            ph_ck, wd_ck, wp_ck, wh_ck, wi_ck = _f_training_plot_arrays_from_ckpt(
+                ckpt, n_rec,
+            )
+            all_phase.extend(ph_ck)
+            all_w_data_term.extend(wd_ck)
+            all_w_phys_term.extend(wp_ck)
+            all_w_hist_term.extend(wh_ck)
+            all_w_ic_term.extend(wi_ck)
+            all_w_hist_far_term.extend(
+                _f_trace_float_series_from_ckpt(ckpt, "weighted_hist_far_term", n_rec),
+            )
+            all_w_hist_mid_term.extend(
+                _f_trace_float_series_from_ckpt(ckpt, "weighted_hist_mid_term", n_rec),
+            )
+            all_w_hist_near0_term.extend(
+                _f_trace_float_series_from_ckpt(ckpt, "weighted_hist_near0_term", n_rec),
+            )
+            all_phys_weight_fraction.extend(
+                _f_trace_float_series_from_ckpt(ckpt, "physics_weight_fraction", n_rec),
+            )
+            all_curriculum_time_frac.extend(
+                _f_trace_float_series_from_ckpt(ckpt, "curriculum_time_fraction", n_rec),
+            )
+            all_win_ix.extend([wi] * n_rec)
             print(f"  [{label}] Resumed from {ckpt_path} "
                   f"(wall_time={ckpt.get('wall_time', 0):.1f}s)")
             continue
@@ -831,10 +1370,32 @@ def f_train_pinn_mackey_glass(
               f"{v_hidden_layers}x{v_hidden_size} {v_activation} "
               f"fourier={v_fourier}")
 
-        ic_t_val = wt0 if wi > 0 else None
-        ic_x_val = float(junction_interp(wt0)) if wi > 0 else None
+        ic_t_val: Optional[float] = None
+        ic_x_val: Optional[float] = None
+        if wi > 0:
+            if junction_mode == "none":
+                pass
+            elif junction_mode == "continuity":
+                if prev_model is None:
+                    raise RuntimeError("continuity junction requires previous window model")
+                prev_model.eval()
+                with torch.no_grad():
+                    _t0 = torch.tensor(
+                        [[float(wt0)]], dtype=torch.float32, device=device,
+                    )
+                    ic_x_val = float(prev_model(_t0).item())
+                ic_t_val = float(wt0)
+            elif junction_mode == "oracle_coarse":
+                ic_x_val = float(ref_interp_coarse(float(wt0)))
+                ic_t_val = float(wt0)
+            else:
+                ic_x_val = float(junction_interp_fine(float(wt0)))
+                ic_t_val = float(wt0)
 
-        wl, wdl, wpl, w_wall = _f_train_single_window(
+        (
+            wl, wdl, wpl, whl, wil, whf, whm, whn, w_wall,
+            d_training_trace_w,
+        ) = _f_train_single_window(
             model, device, d_config,
             v_t_train_np, v_x_train_np,
             v_beta, v_gamma, v_n_hill, v_tau, v_x0,
@@ -846,6 +1407,23 @@ def f_train_pinn_mackey_glass(
         all_loss.extend(wl)
         all_data_l.extend(wdl)
         all_phy_l.extend(wpl)
+        all_hist_l.extend(whl)
+        all_ic_l.extend(wil)
+        all_hist_far_l.extend(whf)
+        all_hist_mid_l.extend(whm)
+        all_hist_near0_l.extend(whn)
+        all_segment_lengths.append(len(wl))
+        all_phase.extend(d_training_trace_w["optimizer_phase"])
+        all_w_data_term.extend(d_training_trace_w["weighted_data_term"])
+        all_w_phys_term.extend(d_training_trace_w["weighted_phys_term"])
+        all_w_hist_term.extend(d_training_trace_w["weighted_hist_term"])
+        all_w_ic_term.extend(d_training_trace_w["weighted_ic_term"])
+        all_w_hist_far_term.extend(d_training_trace_w["weighted_hist_far_term"])
+        all_w_hist_mid_term.extend(d_training_trace_w["weighted_hist_mid_term"])
+        all_w_hist_near0_term.extend(d_training_trace_w["weighted_hist_near0_term"])
+        all_phys_weight_fraction.extend(d_training_trace_w["physics_weight_fraction"])
+        all_curriculum_time_frac.extend(d_training_trace_w["curriculum_time_fraction"])
+        all_win_ix.extend([wi] * len(wl))
 
         model.eval()
         models.append((wt0, wt1, model))
@@ -860,8 +1438,16 @@ def f_train_pinn_mackey_glass(
             "loss_history": wl,
             "data_loss_history": wdl,
             "physics_loss_history": wpl,
+            "history_loss_history": whl,
+            "ic_loss_history": wil,
+            "hist_loss_far_history": whf,
+            "hist_loss_mid_history": whm,
+            "hist_loss_near0_history": whn,
             "wall_time": w_wall,
             "n_value": p_n_value,
+            "planned_n_adam": d_training_trace_w["planned_n_adam"],
+            "planned_n_lbfgs": d_training_trace_w["planned_n_lbfgs"],
+            "training_plot_trace": d_training_trace_w,
         }, ckpt_path)
         print(f"  [{label}] Checkpoint saved: {ckpt_path}")
 
@@ -886,6 +1472,12 @@ def f_train_pinn_mackey_glass(
         "loss_history": all_loss,
         "data_loss_history": all_data_l,
         "physics_loss_history": all_phy_l,
+        "history_loss_history": all_hist_l,
+        "ic_loss_history": all_ic_l,
+        "hist_loss_far_history": all_hist_far_l,
+        "hist_loss_mid_history": all_hist_mid_l,
+        "hist_loss_near0_history": all_hist_near0_l,
+        "loss_segment_lengths": all_segment_lengths,
         "wall_time": v_wall_train,
         "wall_time_train": v_wall_train,
         "wall_time_infer": 0.0,
@@ -896,6 +1488,72 @@ def f_train_pinn_mackey_glass(
         out["t_metric_ref"] = v_tm.reshape(-1, 1)
         out["u_pred_metric_ref"] = v_x_metric.reshape(-1, 1)
     out["wall_time_infer"] = float(time.perf_counter() - t_infer0)
+    out["ablation_config"] = copy.deepcopy(v_ablation)
+    v_n_it_tot = len(all_loss)
+    if v_n_it_tot and (
+        len(all_phase) != v_n_it_tot
+        or len(all_win_ix) != v_n_it_tot
+        or len(all_w_data_term) != v_n_it_tot
+        or len(all_w_phys_term) != v_n_it_tot
+        or len(all_w_hist_term) != v_n_it_tot
+        or len(all_w_ic_term) != v_n_it_tot
+        or len(all_w_hist_far_term) != v_n_it_tot
+        or len(all_w_hist_mid_term) != v_n_it_tot
+        or len(all_w_hist_near0_term) != v_n_it_tot
+        or len(all_phys_weight_fraction) != v_n_it_tot
+        or len(all_curriculum_time_frac) != v_n_it_tot
+    ):
+        print(
+            "  [PINN][warn] training_plot_bundle step arrays length mismatch vs "
+            f"loss_history ({v_n_it_tot}); phase={len(all_phase)}, "
+            f"win_idx={len(all_win_ix)}, w_terms="
+            f"{len(all_w_data_term)}/{len(all_w_phys_term)}/"
+            f"{len(all_w_hist_term)}/{len(all_w_ic_term)}, hist_ic_weighted="
+            f"{len(all_w_hist_far_term)}/{len(all_w_hist_mid_term)}/"
+            f"{len(all_w_hist_near0_term)}, modifiers="
+            f"{len(all_phys_weight_fraction)}/{len(all_curriculum_time_frac)}",
+        )
+    out["training_plot_bundle"] = {
+        "random_seed": int(v_seed),
+        "junction_mode": junction_mode,
+        "supervision_orbit": str(
+            v_ablation.get("supervision_orbit", "coarse_dt"),
+        ).strip().lower(),
+        "delay_grad": str(v_ablation.get("delay_grad", "detach")).strip().lower(),
+        "curriculum_default": bool(
+            (d_config.get("training") or {}).get("curriculum", True),
+        ),
+        "curriculum_ablation_override": (
+            None if v_ablation.get("curriculum") is None
+            else bool(v_ablation["curriculum"])
+        ),
+        "loss_weights_nominal": {
+            "data_loss": float(v_lw_nom.get("data_loss", 1.0)),
+            "physics_loss": float(v_lw_nom.get("physics_loss", 1.0)),
+            "history_loss": float(v_lw_nom.get("history_loss", 1.0)),
+            "ic_loss": float(v_lw_nom.get("ic_loss", 10.0)),
+        },
+        "physics_ramp_iters": int(v_ramp_iters),
+        "planned_n_adam_per_window": int(v_plan_adam),
+        "planned_n_lbfgs_per_window": int(v_plan_lbfgs),
+        "n_windows": int(len(windows)),
+        "windows_physical": [
+            {"t0": float(a), "t1": float(b)} for a, b in windows
+        ],
+        "window_size": float(v_win_size),
+        "window_overlap": float(v_win_overlap),
+        "optimizer_phase_per_step": all_phase,
+        "window_idx_per_step": all_win_ix,
+        "weighted_data_term_per_step": all_w_data_term,
+        "weighted_physics_term_per_step": all_w_phys_term,
+        "weighted_history_term_per_step": all_w_hist_term,
+        "weighted_hist_far_term_per_step": all_w_hist_far_term,
+        "weighted_hist_mid_term_per_step": all_w_hist_mid_term,
+        "weighted_hist_near0_term_per_step": all_w_hist_near0_term,
+        "weighted_ic_term_per_step": all_w_ic_term,
+        "physics_weight_fraction_per_step": all_phys_weight_fraction,
+        "curriculum_time_fraction_per_step": all_curriculum_time_frac,
+    }
     return out
 
 
@@ -1646,8 +2304,8 @@ def f_export_heatmap(
     Builds a 2D image [rows x time] where each row is a slightly
     time-shifted copy of x(t), giving a gradient colored band similar
     to the KdV u(t,x) plot.  White vertical lines mark snapshots.
-    Classical DDE solver and PINN solutions are shown as two wide horizontal
-    strips (stacked vertically).
+    Plots three stacked strips: baseline trajectory (reference or classical
+    DDE), PINN, and pointwise absolute error on the same (t, δ) grid.
     """
     n_rows = 100
     tau_vis = 2.0
@@ -1659,10 +2317,12 @@ def f_export_heatmap(
         base_interp = interp1d(p_t_classical, p_x_classical, kind="cubic",
                                bounds_error=False, fill_value=np.nan)
         base_title = "Classical DDE $x(t+\\delta)$"
+        err_title = r"$|x(t+\delta)-\hat{x}(t+\delta)|$ (Classical vs.\ PINN)"
     else:
         base_interp = interp1d(p_t_ref, p_x_ref, kind="cubic",
                                bounds_error=False, fill_value=np.nan)
         base_title = "Reference $x(t+\\delta)$"
+        err_title = r"$|x^{\mathrm{ref}}(t+\delta)-\hat{x}(t+\delta)|$"
     pinn_interp = interp1d(t_flat, x_flat, kind="cubic",
                            bounds_error=False, fill_value=np.nan)
 
@@ -1673,19 +2333,23 @@ def f_export_heatmap(
         img_base[i, :] = base_interp(t_grid + s)
         img_pinn[i, :] = pinn_interp(t_grid + s)
 
-    fig = plt.figure(figsize=(13, 8))
+    img_err = np.abs(img_base - img_pinn)
 
-    gs = gridspec.GridSpec(2, 1, hspace=0.38, left=0.08, right=0.92,
-                           top=0.90, bottom=0.07)
+    # Shorter figure height + tighter row spacing keeps each δ-strip visually thinner
+    # without changing the interpolated (t, δ) resolution (`n_rows` above).
+    fig = plt.figure(figsize=(13, 7.2))
+
+    gs = gridspec.GridSpec(3, 1, hspace=0.40, left=0.08, right=0.92,
+                           top=0.91, bottom=0.06)
 
     extent = [t_grid.min(), t_grid.max(), shifts.min(), shifts.max()]
-    vmin = np.nanmin(img_base)
-    vmax = np.nanmax(img_base)
+    vmin = np.nanmin(np.minimum(img_base, img_pinn))
+    vmax = np.nanmax(np.maximum(img_base, img_pinn))
 
     ax0 = fig.add_subplot(gs[0, 0])
     h0 = ax0.imshow(img_base, interpolation="nearest", cmap="rainbow",
-                     extent=extent, origin="lower", aspect="auto",
-                     vmin=vmin, vmax=vmax)
+                    extent=extent, origin="lower", aspect="auto",
+                    vmin=vmin, vmax=vmax)
     for ts in p_snapshot_times:
         ax0.plot([ts, ts], [shifts.min(), shifts.max()], "w-", linewidth=1.0)
     divider0 = make_axes_locatable(ax0)
@@ -1697,8 +2361,8 @@ def f_export_heatmap(
 
     ax1 = fig.add_subplot(gs[1, 0])
     h1 = ax1.imshow(img_pinn, interpolation="nearest", cmap="rainbow",
-                     extent=extent, origin="lower", aspect="auto",
-                     vmin=vmin, vmax=vmax)
+                    extent=extent, origin="lower", aspect="auto",
+                    vmin=vmin, vmax=vmax)
     for ts in p_snapshot_times:
         ax1.plot([ts, ts], [shifts.min(), shifts.max()], "w-", linewidth=1.0)
     divider1 = make_axes_locatable(ax1)
@@ -1707,6 +2371,27 @@ def f_export_heatmap(
     ax1.set_xlabel("$t$")
     ax1.set_ylabel("time shift $\\delta$")
     ax1.set_title("PINN $\\hat{x}(t+\\delta)$", fontsize=11)
+
+    fe = img_err[np.isfinite(img_err)]
+    vmin_err = 0.0
+    vmax_err = float(np.percentile(fe, 98.5)) if fe.size > 0 else 1.0
+    vmax_err = max(vmax_err, 1e-9)
+    if np.isnan(vmax_err) or np.isinf(vmax_err):
+        vmax_err = 1e-6
+
+    ax2 = fig.add_subplot(gs[2, 0])
+    h2 = ax2.imshow(img_err, interpolation="nearest", cmap="hot",
+                    extent=extent, origin="lower", aspect="auto",
+                    vmin=vmin_err, vmax=vmax_err)
+    for ts in p_snapshot_times:
+        ax2.plot([ts, ts], [shifts.min(), shifts.max()], "c-", linewidth=0.9)
+    divider2 = make_axes_locatable(ax2)
+    cax2 = divider2.append_axes("right", size="2.5%", pad=0.06)
+    cbar2 = fig.colorbar(h2, cax=cax2)
+    cbar2.set_label("$|e|$ scale to 98.5\\%tile", fontsize=9)
+    ax2.set_xlabel("$t$")
+    ax2.set_ylabel("time shift $\\delta$")
+    ax2.set_title(err_title, fontsize=11)
 
     fig.suptitle(f"Mackey-Glass ($n={p_n_value:g}$)", fontsize=13, fontweight="bold")
     _save(fig, p_output_path)
@@ -1919,20 +2604,555 @@ def f_export_delay_embedding(
     _save(fig, p_output_path)
 
 
-def f_export_loss_curves(p_loss, p_data_loss, p_phy_loss, p_output_path):
-    """Training loss curves (log scale)."""
-    fig, ax = plt.subplots(figsize=(6, 4))
-    iters = np.arange(len(p_loss))
-    ax.semilogy(iters, p_loss, "k-", linewidth=1.0, label="Total")
-    if p_data_loss and len(p_data_loss) == len(p_loss):
-        ax.semilogy(iters, p_data_loss, "b-", linewidth=0.8, alpha=0.7, label="Data")
-    if p_phy_loss and len(p_phy_loss) == len(p_loss):
-        ax.semilogy(iters, p_phy_loss, "g-", linewidth=0.8, alpha=0.7, label="Physics")
-    ax.set_xlabel("Iteration", fontsize=11)
-    ax.set_ylabel("Loss", fontsize=11)
-    ax.legend(fontsize=10, framealpha=0.9)
-    ax.grid(True, alpha=0.2, linestyle=":")
-    fig.tight_layout()
+def _f_iteration_axis_scale(num_steps: int) -> Tuple[float, str]:
+    """Return (scale, xlabel_suffix) matching common PINN convergence plots."""
+    if num_steps <= 1:
+        return 1.0, ""
+    m = float(num_steps - 1)
+    e = int(np.floor(np.log10(m)))
+    if e >= 5:
+        return 1e5, r" ($\times 10^{5}$)"
+    if e >= 4:
+        return 1e4, r" ($\times 10^{4}$)"
+    if e >= 3:
+        return 1e3, r" ($\times 10^{3}$)"
+    return 1.0, ""
+
+
+def f_export_loss_curves(
+    p_loss: Sequence[float],
+    p_data_loss: Optional[Sequence[float]],
+    p_phy_loss: Optional[Sequence[float]],
+    p_output_path: str,
+    p_hist_loss: Optional[Sequence[float]] = None,
+    p_ic_loss: Optional[Sequence[float]] = None,
+    p_loss_segment_lengths: Optional[Sequence[int]] = None,
+    p_known_missing_extended_hist_terms: bool = False,
+) -> None:
+    """Unweighted MSE terms and weighted ``\\mathcal{L}(\\theta)`` vs iteration (log scale).
+
+    Legend matches the paper: ``\\mathcal{L}_{\\mathrm{data}}``,
+    ``\\mathcal{L}_{\\mathrm{phys}}``, ``\\mathcal{L}_{\\mathrm{hist}}``,
+    ``\\mathcal{L}_{\\mathrm{ic}}``, and composite ``\\mathcal{L}(\\theta)``.
+
+    Older ``mglass_run.pkl`` files often omit ``history_loss_history`` /
+    ``ic_loss_history``; those curves are drawn as zeros with a console note
+    unless lengths mismatch ``loss_history`` (then the curve is skipped).
+
+    Pass ``p_known_missing_extended_hist_terms=True`` after detecting legacy
+    checkpoints so the exporter stays quiet once the CLI prints a fuller hint.
+    """
+    y_tot_full = np.asarray(p_loss, dtype=np.float64).ravel()
+    n_it = int(y_tot_full.size)
+    if n_it == 0:
+        return
+    xt = np.arange(n_it, dtype=np.float64)
+    sx, sfx = _f_iteration_axis_scale(n_it)
+    x_scaled = xt / sx
+
+    def _series_ok(seq: Optional[Sequence[float]]) -> bool:
+        if seq is None:
+            return False
+        a = np.asarray(seq, dtype=np.float64).ravel()
+        return a.shape[0] == n_it
+
+    def _hist_ic_series(p_ckpt_field: str, seq: Optional[Sequence[float]]) -> Optional[np.ndarray]:
+        """Return aligned series; zeros if missing so the legend stays complete."""
+        if seq is None:
+            if not p_known_missing_extended_hist_terms:
+                print(
+                    f"  [loss curves] `{p_ckpt_field}` missing ({n_it} iters): "
+                    "drawing zeros — train again (or regenerate pickle) to log histories.",
+                )
+            return np.zeros(n_it, dtype=np.float64)
+        a = np.asarray(seq, dtype=np.float64).ravel()
+        if a.size == 0:
+            print(
+                f"  [loss curves] `{p_ckpt_field}` empty: zeros ({n_it} iters).",
+            )
+            return np.zeros(n_it, dtype=np.float64)
+        if a.size != n_it:
+            print(
+                f"  [loss curves] `{p_ckpt_field}` length {a.size} != "
+                f"{n_it}; skipping curve.",
+            )
+            return None
+        return a.copy()
+
+    l_for_floor: List[np.ndarray] = [y_tot_full]
+    if _series_ok(p_data_loss):
+        l_for_floor.append(np.asarray(p_data_loss, dtype=np.float64).ravel())
+    if _series_ok(p_phy_loss):
+        l_for_floor.append(np.asarray(p_phy_loss, dtype=np.float64).ravel())
+    if _series_ok(p_hist_loss):
+        l_for_floor.append(np.asarray(p_hist_loss, dtype=np.float64).ravel())
+    if _series_ok(p_ic_loss):
+        l_for_floor.append(np.asarray(p_ic_loss, dtype=np.float64).ravel())
+
+    v_pos: List[float] = []
+    for u in l_for_floor:
+        pmask = np.isfinite(u) & (u > 0)
+        if np.any(pmask):
+            v_pos.append(float(np.min(u[pmask])))
+    v_y_floor = max(1e-20, float(min(v_pos)) * 1e-6) if v_pos else 1e-12
+
+    y_tot = np.maximum(y_tot_full, v_y_floor)
+
+    fig, ax = plt.subplots(figsize=(10, 5.2))
+    parts: List[Tuple[np.ndarray, str, str]] = []
+
+    if _series_ok(p_data_loss):
+        parts.append((
+            np.maximum(np.asarray(p_data_loss, dtype=np.float64).ravel(), v_y_floor),
+            r"$\mathcal{L}_{\mathrm{data}}$",
+            "#1f77b4",
+        ))
+    if _series_ok(p_phy_loss):
+        parts.append((
+            np.maximum(np.asarray(p_phy_loss, dtype=np.float64).ravel(), v_y_floor),
+            r"$\mathcal{L}_{\mathrm{phys}}$",
+            "#2ca02c",
+        ))
+
+    arr_hist = _hist_ic_series("history_loss_history", p_hist_loss)
+    arr_ic = _hist_ic_series("ic_loss_history", p_ic_loss)
+    if arr_hist is not None:
+        parts.append((
+            np.maximum(arr_hist, v_y_floor),
+            r"$\mathcal{L}_{\mathrm{hist}}$",
+            "#ff7f0e",
+        ))
+    if arr_ic is not None:
+        parts.append((
+            np.maximum(arr_ic, v_y_floor),
+            r"$\mathcal{L}_{\mathrm{ic}}$",
+            "#9467bd",
+        ))
+    for y_plt, lbl, clr in parts:
+        ax.semilogy(x_scaled, y_plt, color=clr, linewidth=1.15, alpha=0.95, label=lbl)
+
+    ax.semilogy(x_scaled, y_tot, color="black", linestyle="--", linewidth=1.45,
+                alpha=0.9, label=r"$\mathcal{L}(\theta)$")
+
+    if p_loss_segment_lengths:
+        lengths = np.asarray(p_loss_segment_lengths, dtype=np.int64).tolist()
+        if sum(lengths) == n_it and len(lengths) > 1:
+            cuts = np.cumsum(lengths[:-1])
+            for k in cuts:
+                ax.axvline(
+                    float(k) / sx, color="#555555",
+                    linestyle=":", linewidth=0.9, alpha=0.5, zorder=0,
+                )
+
+    ax.set_yscale("log")
+    ax.set_title("Loss convergence", fontsize=13, pad=10)
+    xlbl = r"Iteration" + (sfx if sfx else "")
+    ax.set_xlabel(xlbl, fontsize=12)
+    ax.set_ylabel(r"MSE loss terms", fontsize=12)
+    hL, lbls = ax.get_legend_handles_labels()
+    by_label = dict(zip(lbls, hL))
+    ax.legend(
+        by_label.values(), by_label.keys(),
+        fontsize=10, ncol=2, framealpha=0.92,
+    )
+    ax.grid(True, which="major", linestyle="-", linewidth=0.55, alpha=0.38)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.33, alpha=0.28)
+    fig.subplots_adjust(bottom=0.11, left=0.09, top=0.92, right=0.98)
+    _save(fig, p_output_path)
+
+
+def f_export_junction_ic_loss_convergence(
+    p_ic_loss: Sequence[float],
+    p_output_path: str,
+    p_loss_segment_lengths: Optional[Sequence[int]] = None,
+    p_aligned_len: Optional[int] = None,
+) -> None:
+    """MSE convergence for the junction / initial-condition term $\\mathcal{L}_{\\mathrm{ic}}$."""
+    v_y_floor = 1e-16
+    y_ic = np.asarray(p_ic_loss, dtype=np.float64).ravel()
+    n_ic = int(y_ic.size)
+    if n_ic == 0:
+        return
+    if p_aligned_len is not None and int(p_aligned_len) != n_ic:
+        print(
+            f"  [skip] IC loss convergence: length mismatch "
+            f"({n_ic} vs {int(p_aligned_len)} total iterations)",
+        )
+        return
+
+    xt = np.arange(n_ic, dtype=np.float64)
+    sx, sfx = _f_iteration_axis_scale(n_ic)
+    x_scaled = xt / sx
+
+    fig, ax = plt.subplots(figsize=(10, 4.25))
+    y_plot = np.maximum(y_ic, v_y_floor)
+    ax.semilogy(x_scaled, y_plot, color="#9467bd", linewidth=1.35, alpha=0.95,
+                label=r"$\mathcal{L}_{\mathrm{ic}}$")
+
+    if p_loss_segment_lengths:
+        lengths = np.asarray(p_loss_segment_lengths, dtype=np.int64).tolist()
+        if sum(lengths) == n_ic and len(lengths) > 1:
+            cuts = np.cumsum(lengths[:-1])
+            for k in cuts:
+                ax.axvline(
+                    float(k) / sx, color="#555555",
+                    linestyle=":", linewidth=0.9, alpha=0.5, zorder=0,
+                )
+
+    ax.set_yscale("log")
+    ax.set_title(r"$\mathcal{L}_{\mathrm{ic}}$ (junction IC MSE)", fontsize=13, pad=10)
+    xlbl = r"Iteration" + (sfx if sfx else "")
+    ax.set_xlabel(xlbl, fontsize=12)
+    ax.set_ylabel(r"$\mathcal{L}_{\mathrm{ic}}$", fontsize=12)
+    ax.legend(fontsize=11, framealpha=0.92)
+    ax.grid(True, which="major", linestyle="-", linewidth=0.55, alpha=0.38)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.33, alpha=0.28)
+    fig.subplots_adjust(bottom=0.13, left=0.10, top=0.90, right=0.98)
+    _save(fig, p_output_path)
+
+
+def f_export_mglass_prescribed_ic_breakdown_ns(
+    p_aligned_len: int,
+    p_hist_far: Optional[Sequence[float]],
+    p_hist_mid: Optional[Sequence[float]],
+    p_hist_near0: Optional[Sequence[float]],
+    p_hist_agg: Optional[Sequence[float]],
+    p_ic: Optional[Sequence[float]],
+    p_output_path: str,
+    p_loss_segment_lengths: Optional[Sequence[int]] = None,
+) -> None:
+    """Navier-Stokes-style panel: residuals on prescribed history slices + junction \\mathcal{L}_{ic}.
+
+    MG is scalar; analogous “multiple ICs” split the enforced history curve on ``[-\\tau,0]``.
+    """
+    def _nz(seq: Optional[Sequence[float]]) -> Optional[np.ndarray]:
+        if seq is None:
+            return None
+        a = np.asarray(seq, dtype=np.float64).ravel()
+        if a.size != int(p_aligned_len):
+            return None
+        return np.maximum(a, 1e-16)
+
+    n_it = int(p_aligned_len)
+    if n_it <= 0:
+        return
+
+    xf = _nz(p_hist_far)
+    xm = _nz(p_hist_mid)
+    xn0 = _nz(p_hist_near0)
+    xh = _nz(p_hist_agg)
+    x_ic = _nz(p_ic)
+
+    traces: List[Tuple[np.ndarray, str, str]] = []
+    v_bins_ready = xf is not None and xm is not None and xn0 is not None
+    if v_bins_ready:
+        traces.extend([
+            (xf,
+             r"$\mathcal{L}_{\mathrm{hist}}\,(-\tau\ \mathrm{band})$", "#084594"),
+            (xm,
+             r"$\mathcal{L}_{\mathrm{hist}}\,(\mathrm{mid})$", "#4292c6"),
+            (xn0,
+             r"$\mathcal{L}_{\mathrm{hist}}\,(0^{-}\ \mathrm{band})$", "#9ecae1"),
+        ])
+    elif xh is not None:
+        traces.append(
+            (xh, r"$\mathcal{L}_{\mathrm{hist}}$", "#ff7f0e"),
+        )
+    if x_ic is not None:
+        traces.append(
+            (x_ic, r"$\mathcal{L}_{\mathrm{ic}}$", "#9467bd"),
+        )
+    if not traces:
+        return
+
+    xt = np.arange(n_it, dtype=np.float64)
+    sx, sfx = _f_iteration_axis_scale(n_it)
+    x_scaled = xt / sx
+
+    fig, ax = plt.subplots(figsize=(10, 5.25))
+    for y_plt, lbl, clr in traces:
+        ax.semilogy(x_scaled, y_plt, linewidth=1.15, alpha=0.95, label=lbl,
+                    color=clr)
+
+    if p_loss_segment_lengths:
+        lengths = np.asarray(p_loss_segment_lengths, dtype=np.int64).tolist()
+        if sum(lengths) == n_it and len(lengths) > 1:
+            cuts = np.cumsum(lengths[:-1])
+            for k in cuts:
+                ax.axvline(
+                    float(k) / sx, color="#555555",
+                    linestyle=":", linewidth=0.9, alpha=0.5, zorder=0,
+                )
+
+    ax.set_yscale("log")
+    ax.set_title(
+        "Prescribed history & junction (IC-style residuals; scalar Mackey-Glass PINN)",
+        fontsize=13,
+        pad=10,
+    )
+    xlbl = r"Iteration" + (sfx if sfx else "")
+    ax.set_xlabel(xlbl, fontsize=12)
+    ax.set_ylabel(r"MSE residual", fontsize=12)
+    hL, lbls = ax.get_legend_handles_labels()
+    by_label = dict(zip(lbls, hL))
+    ax.legend(
+        by_label.values(), by_label.keys(),
+        fontsize=10, ncol=2, framealpha=0.92,
+    )
+    ax.grid(True, which="major", linestyle="-", linewidth=0.55, alpha=0.38)
+    ax.grid(True, which="minor", linestyle=":", linewidth=0.33, alpha=0.28)
+    fig.subplots_adjust(bottom=0.13, left=0.10, top=0.90, right=0.98)
+    _save(fig, p_output_path)
+
+
+def f_export_mglass_ic_terms_ns_three_panel(
+    p_aligned_len: int,
+    p_hist_far: Optional[Sequence[float]],
+    p_hist_mid: Optional[Sequence[float]],
+    p_hist_near0: Optional[Sequence[float]],
+    p_hist_agg: Optional[Sequence[float]],
+    p_ic: Optional[Sequence[float]],
+    p_training_plot_bundle: Optional[Dict[str, Any]],
+    p_output_path: str,
+    p_loss_segment_lengths: Optional[Sequence[int]] = None,
+) -> None:
+    """Navier-Stokes-style **stack** for MG: IC-type histories + junction, plus modifiers.
+
+    * **Top**: unweighted MSE on prescribed history thirds on ``[-\\tau, 0]`` (when
+      available) plus junction ``\\mathcal{L}_{\\mathrm{ic}}``.
+    * **Middle**: weighted contributions logged during training when present
+      (``weighted_*_term_per_step`` inside ``training_plot_bundle``); else
+      nominal ``loss_weights_nominal`` times the unweighted MSE traces.
+    * **Bottom**: physics-loss multiplier relative to YAML weight (Adam ramp),
+      and curriculum fraction of the active time window — both ``\\in [0,1]``.
+      If those series were never saved (old checkpoints/pickles), the panel shows
+      a short note instead of empty axes.
+    """
+    def _as_pos(seq: Optional[Sequence[float]], n: int) -> Optional[np.ndarray]:
+        if seq is None:
+            return None
+        a = np.asarray(seq, dtype=np.float64).ravel()
+        if a.size != int(n):
+            return None
+        out = np.array(a, copy=True)
+        finite = np.isfinite(out)
+        if not np.any(finite):
+            return None
+        return np.maximum(out, 1e-16)
+
+    n_it = int(p_aligned_len)
+    if n_it <= 0:
+        return
+
+    tb_any = (
+        p_training_plot_bundle if isinstance(p_training_plot_bundle, dict) else {}
+    )
+    lw = tb_any.get("loss_weights_nominal") or {}
+    w_hist_nom = float(lw.get("history_loss", 1.0))
+    w_ic_nom = float(lw.get("ic_loss", 10.0))
+
+    xf = _as_pos(p_hist_far, n_it)
+    xm = _as_pos(p_hist_mid, n_it)
+    xn0 = _as_pos(p_hist_near0, n_it)
+    xh = _as_pos(p_hist_agg, n_it)
+    x_ic = _as_pos(p_ic, n_it)
+
+    pan1_traces: List[Tuple[np.ndarray, str, str]] = []
+    v_bins_ready = xf is not None and xm is not None and xn0 is not None
+    if v_bins_ready:
+        pan1_traces.extend([
+            (xf,
+             r"$\mathcal{L}_{\mathrm{hist}}\,(-\tau\ \mathrm{band})$", "#084594"),
+            (xm,
+             r"$\mathcal{L}_{\mathrm{hist}}\,(\mathrm{mid})$", "#4292c6"),
+            (xn0,
+             r"$\mathcal{L}_{\mathrm{hist}}\,(0^{-}\ \mathrm{band})$", "#9ecae1"),
+        ])
+    elif xh is not None:
+        pan1_traces.append((xh, r"$\mathcal{L}_{\mathrm{hist}}$", "#ff7f0e"))
+    if x_ic is not None:
+        pan1_traces.append((x_ic, r"$\mathcal{L}_{\mathrm{ic}}$", "#9467bd"))
+
+    if not pan1_traces:
+        return
+
+    def _bundle_series(keyx: str) -> Optional[np.ndarray]:
+        xs = tb_any.get(keyx)
+        if xs is None:
+            return None
+        if isinstance(xs, (list, tuple, np.ndarray)):
+            a = np.asarray(xs, dtype=np.float64).ravel()
+        else:
+            return None
+        if a.size != n_it:
+            return None
+        return a
+
+    wf_pt = _bundle_series("weighted_hist_far_term_per_step")
+    wm_pt = _bundle_series("weighted_hist_mid_term_per_step")
+    wn0_pt = _bundle_series("weighted_hist_near0_term_per_step")
+    wic_pt = _bundle_series("weighted_ic_term_per_step")
+    wt_hist_agg = _bundle_series("weighted_history_term_per_step")
+
+    pan2_traces: List[Tuple[np.ndarray, str, str]] = []
+    if v_bins_ready:
+        for arr_uw, lbl, clr, bk in [
+            (xf, r"$\lambda_{\mathrm{hist}}\mathcal{L}_{\mathrm{hist}}\,(-\tau)$",
+             "#084594", wf_pt),
+            (xm, r"$\lambda_{\mathrm{hist}}\mathcal{L}_{\mathrm{hist}}\,(\mathrm{mid})$",
+             "#4292c6", wm_pt),
+            (xn0,
+             r"$\lambda_{\mathrm{hist}}\mathcal{L}_{\mathrm{hist}}\,(0^{-})$",
+             "#9ecae1", wn0_pt),
+        ]:
+            s = bk if bk is not None else (w_hist_nom * arr_uw)
+            pan2_traces.append((np.maximum(s, 1e-16), lbl, clr))
+    elif xh is not None:
+        hist_w = wt_hist_agg if wt_hist_agg is not None else w_hist_nom * xh
+        pan2_traces.append((np.maximum(hist_w, 1e-16),
+                            r"$\lambda_{\mathrm{hist}}\mathcal{L}_{\mathrm{hist}}$",
+                            "#ff7f0e"))
+
+    if x_ic is not None:
+        sic = (
+            wic_pt if wic_pt is not None else w_ic_nom * x_ic
+        )
+        pan2_traces.append((
+            np.maximum(sic, 1e-16),
+            r"$\lambda_{\mathrm{ic}}\mathcal{L}_{\mathrm{ic}}$",
+            "#9467bd",
+        ))
+
+    xt = np.arange(n_it, dtype=np.float64)
+    sx, sfx = _f_iteration_axis_scale(n_it)
+    x_scaled = xt / sx
+
+    def _vlines(ax_plt) -> None:
+        if not p_loss_segment_lengths:
+            return
+        lengths = np.asarray(p_loss_segment_lengths, dtype=np.int64).tolist()
+        if sum(lengths) == n_it and len(lengths) > 1:
+            for k in np.cumsum(lengths[:-1]):
+                ax_plt.axvline(
+                    float(k) / sx, color="#555555",
+                    linestyle=":", linewidth=0.85, alpha=0.45, zorder=0,
+                )
+
+    phy_f = _bundle_series("physics_weight_fraction_per_step")
+    cur_f = _bundle_series("curriculum_time_fraction_per_step")
+
+    floor_vals: List[float] = []
+    for arr, _, __ in pan1_traces:
+        pv = arr[np.isfinite(arr) & (arr > 0)]
+        if pv.size > 0:
+            floor_vals.append(float(np.min(pv)))
+    for arr, _, __ in pan2_traces:
+        pv = arr[np.isfinite(arr) & (arr > 0)]
+        if pv.size > 0:
+            floor_vals.append(float(np.min(pv)))
+    y_floor_log = (
+        max(1e-20, min(floor_vals) * 1e-6) if floor_vals else 1e-12
+    )
+
+    fig, axes = plt.subplots(3, 1, figsize=(10, 11.8), squeeze=False)
+    ax1, ax2, ax3 = axes.flatten()
+
+    for arr, lbl, clr in pan1_traces:
+        yy = np.maximum(arr, y_floor_log)
+        ax1.semilogy(x_scaled, yy, linewidth=1.12, alpha=0.95, label=lbl, color=clr)
+    _vlines(ax1)
+    ax1.set_yscale("log")
+    ax1.set_title(
+        "(a) IC-style residuals (unweighted MSE)",
+        fontsize=13, pad=8,
+    )
+    ax1.set_ylabel(r"MSE term", fontsize=11)
+    ax1.grid(True, which="major", linestyle="-", linewidth=0.5, alpha=0.38)
+    ax1.grid(True, which="minor", linestyle=":", linewidth=0.3, alpha=0.26)
+    hL, lbls = ax1.get_legend_handles_labels()
+    by_li = dict(zip(lbls, hL))
+    ax1.legend(
+        by_li.values(), by_li.keys(),
+        fontsize=9, ncol=2, framealpha=0.93, loc="upper right",
+    )
+
+    for arr, lbl, clr in pan2_traces:
+        yy = np.maximum(arr, y_floor_log)
+        ax2.semilogy(x_scaled, yy, linewidth=1.12, alpha=0.95, label=lbl, color=clr)
+    _vlines(ax2)
+    ax2.set_yscale("log")
+    ax2.set_title(
+        "(b) Weighted IC-style contributions "
+        r"($\lambda_{\mathrm{hist}}$, $\lambda_{\mathrm{ic}}$ from config / trace)",
+        fontsize=13, pad=8,
+    )
+    ax2.set_ylabel(r"Weighted term", fontsize=11)
+    ax2.grid(True, which="major", linestyle="-", linewidth=0.5, alpha=0.38)
+    ax2.grid(True, which="minor", linestyle=":", linewidth=0.3, alpha=0.26)
+    h2, lb2 = ax2.get_legend_handles_labels()
+    by_2 = dict(zip(lb2, h2))
+    ax2.legend(
+        by_2.values(), by_2.keys(),
+        fontsize=9, ncol=2, framealpha=0.93, loc="upper right",
+    )
+
+    xlbl_main = r"Iteration" + (sfx if sfx else "")
+    v_phy_ok = phy_f is not None and np.any(np.isfinite(phy_f))
+    v_cur_ok = cur_f is not None and np.any(np.isfinite(cur_f))
+    v_show_sched = v_phy_ok or v_cur_ok
+
+    if v_show_sched:
+        ax3.set_ylim(-0.05, 1.08)
+    if v_phy_ok:
+        ax3.plot(
+            x_scaled, np.clip(phy_f, 0.0, 1.05), color="#333333",
+            linewidth=1.15, alpha=0.95,
+            label=r"$\lambda_{\mathrm{phys}}(k) \,/\, "
+                  r"\lambda_{\mathrm{phys}}^{(\mathrm{nom})}$",
+        )
+    if v_cur_ok:
+        ax3.plot(
+            x_scaled, np.clip(cur_f, 0.0, 1.05), color="#3182bd",
+            linewidth=1.05, alpha=0.9,
+            label=r"Curriculum frac.\ (active $t$-range)",
+        )
+    if not v_show_sched:
+        ax3.text(
+            0.5, 0.52,
+            "No physics ramp / curriculum traces\n"
+            "(retrain after upgrade, or use newer checkpoints)",
+            ha="center", va="center", fontsize=10, transform=ax3.transAxes,
+        )
+        ax3.set_xticks([])
+        ax3.set_yticks([])
+        ax3.set_frame_on(False)
+
+    ax3.set_title(
+        "(c) Training schedule (modifiers vs iteration)",
+        fontsize=13, pad=8,
+    )
+    if v_show_sched:
+        _vlines(ax3)
+        ax3.set_xlabel(xlbl_main, fontsize=12)
+        ax3.set_ylabel(r"Fraction in $[0,1]$", fontsize=11)
+        ax3.grid(True, linestyle=":", linewidth=0.45, alpha=0.42)
+        h3, lb3 = ax3.get_legend_handles_labels()
+        by3 = dict(zip(lb3, h3))
+        ax3.legend(
+            by3.values(), by3.keys(),
+            fontsize=9, ncol=1, framealpha=0.92, loc="upper right",
+        )
+    else:
+        ax3.set_xlabel("")
+        ax3.set_ylabel("")
+
+    if v_show_sched:
+        ax1.tick_params(axis="x", labelbottom=False)
+        ax2.tick_params(axis="x", labelbottom=False)
+        fig.subplots_adjust(left=0.10, right=0.98, top=0.96, bottom=0.06, hspace=0.36)
+    else:
+        ax2.set_xlabel(xlbl_main, fontsize=12)
+        fig.subplots_adjust(left=0.10, right=0.98, top=0.96, bottom=0.08, hspace=0.38)
     _save(fig, p_output_path)
 
 
@@ -1973,6 +3193,13 @@ def f_create_mglass_figure(
     p_snapshot_times, p_snapshot_window,
     p_output_path,
     p_loss_history=None, p_data_loss_history=None, p_physics_loss_history=None,
+    p_hist_loss_history=None,
+    p_ic_loss_history=None,
+    p_loss_segment_lengths=None,
+    p_hist_loss_far_history=None,
+    p_hist_loss_mid_history=None,
+    p_hist_loss_near0_history=None,
+    p_training_plot_bundle: Optional[Dict[str, Any]] = None,
 ):
     """
     Raissi PINNs-style combined figure (gridspec layout).
@@ -2131,6 +3358,44 @@ def f_create_mglass_figure(
         f_export_loss_curves(
             p_loss_history, p_data_loss_history, p_physics_loss_history,
             os.path.join(v_dir, f"{v_prefix}_loss_curves.png"),
+            p_hist_loss=p_hist_loss_history,
+            p_ic_loss=p_ic_loss_history,
+            p_loss_segment_lengths=p_loss_segment_lengths,
+        )
+        if (
+            p_ic_loss_history is not None
+            and len(p_ic_loss_history) > 0
+            and len(p_ic_loss_history) == len(p_loss_history)
+        ):
+            f_export_junction_ic_loss_convergence(
+                p_ic_loss_history,
+                os.path.join(v_dir, f"{v_prefix}_lic_loss_convergence.png"),
+                p_loss_segment_lengths=p_loss_segment_lengths,
+                p_aligned_len=len(p_loss_history),
+            )
+        f_export_mglass_prescribed_ic_breakdown_ns(
+            len(p_loss_history),
+            p_hist_far=p_hist_loss_far_history,
+            p_hist_mid=p_hist_loss_mid_history,
+            p_hist_near0=p_hist_loss_near0_history,
+            p_hist_agg=p_hist_loss_history,
+            p_ic=p_ic_loss_history,
+            p_output_path=os.path.join(v_dir,
+                                       f"{v_prefix}_prescribed_ic_hist_breakdown.png"),
+            p_loss_segment_lengths=p_loss_segment_lengths,
+        )
+        f_export_mglass_ic_terms_ns_three_panel(
+            len(p_loss_history),
+            p_hist_far=p_hist_loss_far_history,
+            p_hist_mid=p_hist_loss_mid_history,
+            p_hist_near0=p_hist_loss_near0_history,
+            p_hist_agg=p_hist_loss_history,
+            p_ic=p_ic_loss_history,
+            p_training_plot_bundle=p_training_plot_bundle,
+            p_output_path=os.path.join(
+                v_dir, f"{v_prefix}_ic_terms_ns_three_panel.png",
+            ),
+            p_loss_segment_lengths=p_loss_segment_lengths,
         )
     f_export_pointwise_error(
         p_t_ref, p_x_ref, p_t_pinn_test, p_x_pinn,
@@ -2302,6 +3567,12 @@ def f_parse_args():
         help="Skip PINN training (classical solver only)",
     )
     v_parser.add_argument(
+        "--ignore-pinn-checkpoints",
+        action="store_true",
+        help="Never resume PINN from checkpoints_n{N}/window_*.pt; retrain all windows "
+             "fresh (needed when old checkpoints omit history / junction traces).",
+    )
+    v_parser.add_argument(
         "--snapshot-times",
         default=None,
         help="Comma-separated snapshot times for zoomed windows (auto if not set)",
@@ -2385,9 +3656,25 @@ def f_parse_args():
              "(no classical solve, no reference RK4, no PINN).",
     )
     v_parser.add_argument(
+        "--only-loss-convergence",
+        action="store_true",
+        help="Load mglass_run.pkl and regenerate n*_loss_curves.*, LIC plot, "
+             "prescribed-history IC-breakdown, ``n*_ic_terms_ns_three_panel.*``, "
+             "and (when checkpoints contain them but the pickle lacks them) splice "
+             "extended histories from ``checkpoints_n{N}/window_*.pt``.",
+    )
+    v_parser.add_argument(
+        "--only-heatmap",
+        action="store_true",
+        help="Load mglass_run.pkl and regenerate n*_heatmap.{png,pdf} only "
+             "(classical/reference strip, PINN strip, absolute-error strip).",
+    )
+    v_parser.add_argument(
         "--from-pkl",
         default=None,
-        help="Pickle path for --only-3d-overlay (default: OUTPUT_DIR/mglass_run.pkl).",
+        help="Pickle path for export-only modes: ``--only-3d-overlay``, "
+             "``--only-heatmap``, ``--only-loss-convergence`` "
+             "(default: OUTPUT_DIR/mglass_run.pkl).",
     )
     return v_parser.parse_args()
 
@@ -2413,16 +3700,16 @@ def main():
     v_args.output_dir = f_resolve_bundle_output_dir(v_args.output_dir)
 
     if v_args.only_3d_overlay:
-        os.makedirs(v_args.output_dir, exist_ok=True)
-        v_pkl = v_args.from_pkl or os.path.join(v_args.output_dir, "mglass_run.pkl")
-        if not os.path.isfile(v_pkl):
-            raise SystemExit(f"--only-3d-overlay: pickle not found: {v_pkl}")
+        v_pkl, v_export_dir = f_resolve_mglass_run_pkl_for_export(
+            v_args.output_dir, v_args.from_pkl, "--only-3d-overlay",
+        )
+        os.makedirs(v_export_dir, exist_ok=True)
         with open(v_pkl, "rb") as fh:
             d_all_results = pickle.load(fh)
         l_export_n = [float(x.strip()) for x in v_args.n_values.split(",")]
         print("=" * 60)
         print("ONLY 3D OVERLAY: loading", v_pkl)
-        print("  output:", v_args.output_dir)
+        print("  output:", v_export_dir)
         print("  n values:", l_export_n)
         print("=" * 60)
         for v_n in l_export_n:
@@ -2439,7 +3726,7 @@ def main():
             if not np.isfinite(v_tau):
                 print(f"  [skip] n={v_n:g}: missing tau in pickle")
                 continue
-            v_out = os.path.join(v_args.output_dir, f"n{v_n:g}_3d_overlay.png")
+            v_out = os.path.join(v_export_dir, f"n{v_n:g}_3d_overlay.png")
             f_export_3d_overlay(
                 d_r["t_ref"], d_r["x_ref"],
                 d_r["t_classical"], d_r["x_classical"],
@@ -2447,7 +3734,154 @@ def main():
                 v_tau, v_n,
                 v_out,
             )
-        print(f"\nDone. Overlay(s) written under {v_args.output_dir}/")
+        print(f"\nDone. Overlay(s) written under {v_export_dir}/")
+        return
+
+    if v_args.only_heatmap:
+        v_pkl, v_export_dir = f_resolve_mglass_run_pkl_for_export(
+            v_args.output_dir, v_args.from_pkl, "--only-heatmap",
+        )
+        os.makedirs(v_export_dir, exist_ok=True)
+        with open(v_pkl, "rb") as fh:
+            d_all_results = pickle.load(fh)
+        l_export_n = [float(x.strip()) for x in v_args.n_values.split(",")]
+        print("=" * 60)
+        print("ONLY HEATMAP: loading", v_pkl)
+        print("  output:", v_export_dir)
+        print("  n values:", l_export_n)
+        print("=" * 60)
+        for v_n in l_export_n:
+            v_key = _f_result_key_for_n(d_all_results, v_n)
+            if v_key is None:
+                print(f"  [skip] n={v_n:g} not in pickle (keys: {list(d_all_results.keys())})")
+                continue
+            d_r = d_all_results[v_key]
+            xp = d_r.get("x_pinn")
+            if xp is None or (hasattr(xp, "size") and xp.size == 0):
+                print(f"  [skip] n={v_n:g}: no PINN trajectory in pickle")
+                continue
+            t_hi = float(np.nanmax(np.asarray(d_r["t_ref"]).ravel()))
+            if v_args.snapshot_times:
+                l_snaps = [float(x.strip()) for x in v_args.snapshot_times.split(",")]
+            else:
+                l_snaps = [t_hi * 0.1, t_hi * 0.4, t_hi * 0.8]
+            v_ht = os.path.join(v_export_dir, f"n{v_n:g}_heatmap.png")
+            f_export_heatmap(
+                d_r["t_ref"], d_r["x_ref"],
+                d_r["t_pinn_test"], xp,
+                l_snaps, v_n, v_ht,
+                p_t_classical=d_r.get("t_classical"),
+                p_x_classical=d_r.get("x_classical"),
+            )
+        print(f"\nDone. Heatmap(s) written under {v_export_dir}/")
+        return
+
+    if v_args.only_loss_convergence:
+        v_pkl, v_export_dir = f_resolve_mglass_run_pkl_for_export(
+            v_args.output_dir, v_args.from_pkl, "--only-loss-convergence",
+        )
+        os.makedirs(v_export_dir, exist_ok=True)
+        with open(v_pkl, "rb") as fh:
+            d_all_results = pickle.load(fh)
+        l_export_n = [float(x.strip()) for x in v_args.n_values.split(",")]
+        print("=" * 60)
+        print("ONLY LOSS CONVERGENCE: loading", v_pkl)
+        print("  output:", v_export_dir)
+        print("  n values:", l_export_n)
+        print("=" * 60)
+        for v_n in l_export_n:
+            v_key = _f_result_key_for_n(d_all_results, v_n)
+            if v_key is None:
+                print(f"  [skip] n={v_n:g} not in pickle (keys: {list(d_all_results.keys())})")
+                continue
+            d_r = d_all_results[v_key]
+            v_lh = d_r.get("loss_history") or []
+            if len(v_lh) == 0:
+                print(f"  [skip] n={v_n:g}: empty loss_history in pickle")
+                continue
+            n_it = len(v_lh)
+            d_plot = dict(d_r)
+            v_merge = f_try_merge_extended_histories_from_checkpoints(
+                v_export_dir, v_n, n_it,
+            )
+            for fk, fv in v_merge.items():
+                if not _f_loss_trace_usable(d_plot.get(fk), n_it):
+                    d_plot[fk] = fv
+            if v_merge:
+                print(
+                    f"  [info] n={v_n:g}: filled from checkpoints_n{v_n:g}/: "
+                    f"{', '.join(sorted(v_merge.keys()))}",
+                )
+            v_quiet_miss = (
+                len(v_merge) == 0
+                and f_shard0_extended_hist_absent(v_export_dir, v_n)
+            )
+            v_out = os.path.join(v_export_dir, f"n{v_n:g}_loss_curves.png")
+            f_export_loss_curves(
+                v_lh,
+                d_plot.get("data_loss_history"),
+                d_plot.get("physics_loss_history"),
+                v_out,
+                p_hist_loss=d_plot.get("history_loss_history"),
+                p_ic_loss=d_plot.get("ic_loss_history"),
+                p_loss_segment_lengths=d_plot.get("loss_segment_lengths"),
+                p_known_missing_extended_hist_terms=v_quiet_miss,
+            )
+            f_export_mglass_prescribed_ic_breakdown_ns(
+                n_it,
+                p_hist_far=d_plot.get("hist_loss_far_history"),
+                p_hist_mid=d_plot.get("hist_loss_mid_history"),
+                p_hist_near0=d_plot.get("hist_loss_near0_history"),
+                p_hist_agg=d_plot.get("history_loss_history"),
+                p_ic=d_plot.get("ic_loss_history"),
+                p_output_path=os.path.join(
+                    v_export_dir, f"n{v_n:g}_prescribed_ic_hist_breakdown.png",
+                ),
+                p_loss_segment_lengths=d_plot.get("loss_segment_lengths"),
+            )
+            f_export_mglass_ic_terms_ns_three_panel(
+                n_it,
+                p_hist_far=d_plot.get("hist_loss_far_history"),
+                p_hist_mid=d_plot.get("hist_loss_mid_history"),
+                p_hist_near0=d_plot.get("hist_loss_near0_history"),
+                p_hist_agg=d_plot.get("history_loss_history"),
+                p_ic=d_plot.get("ic_loss_history"),
+                p_training_plot_bundle=d_plot.get("training_plot_bundle"),
+                p_output_path=os.path.join(
+                    v_export_dir, f"n{v_n:g}_ic_terms_ns_three_panel.png",
+                ),
+                p_loss_segment_lengths=d_plot.get("loss_segment_lengths"),
+            )
+            v_ic = d_plot.get("ic_loss_history") or []
+            if len(v_ic) > 0 and len(v_ic) == n_it:
+                v_ic_out = os.path.join(
+                    v_export_dir, f"n{v_n:g}_lic_loss_convergence.png",
+                )
+                f_export_junction_ic_loss_convergence(
+                    v_ic,
+                    v_ic_out,
+                    p_loss_segment_lengths=d_plot.get("loss_segment_lengths"),
+                    p_aligned_len=n_it,
+                )
+            v_miss_hist = not _f_loss_trace_usable(
+                d_plot.get("history_loss_history"), n_it,
+            )
+            v_miss_ic = not _f_loss_trace_usable(
+                d_plot.get("ic_loss_history"), n_it,
+            )
+            if v_miss_hist or v_miss_ic:
+                v_expl = f_describe_extended_history_gap(v_export_dir, v_n)
+                if v_expl:
+                    v_which = []
+                    if v_miss_hist:
+                        v_which.append("`history_loss_history`")
+                    if v_miss_ic:
+                        v_which.append("`ic_loss_history`")
+                    print(
+                        f"  [info] n={v_n:g}: missing or misaligned "
+                        f"{', '.join(v_which)}. {v_expl}",
+                    )
+        print(f"\nDone. Loss curve(s) written under {v_export_dir}/")
         return
 
     v_args.config = f_resolve_bundle_config_path(v_args.config)
@@ -2456,6 +3890,12 @@ def main():
     os.makedirs(v_args.output_dir, exist_ok=True)
 
     d_config = f_load_config(v_args.config)
+    if v_args.ignore_pinn_checkpoints:
+        d_config["_ignore_pinn_checkpoints"] = True
+        print(
+            "[config] --ignore-pinn-checkpoints: PINN windows will not resume "
+            "from checkpoints_n*/window_*.pt on disk.",
+        )
     if v_args.seed is not None:
         d_config["_seed"] = int(v_args.seed)
     if v_args.dt is not None:
@@ -2668,6 +4108,15 @@ def main():
             "loss_history": d_pinn_result["loss_history"] if d_pinn_result else [],
             "data_loss_history": d_pinn_result["data_loss_history"] if d_pinn_result else [],
             "physics_loss_history": d_pinn_result["physics_loss_history"] if d_pinn_result else [],
+            "history_loss_history": d_pinn_result.get("history_loss_history", []) if d_pinn_result else [],
+            "ic_loss_history": d_pinn_result.get("ic_loss_history", []) if d_pinn_result else [],
+            "hist_loss_far_history": d_pinn_result.get("hist_loss_far_history", []) if d_pinn_result else [],
+            "hist_loss_mid_history": d_pinn_result.get("hist_loss_mid_history", []) if d_pinn_result else [],
+            "hist_loss_near0_history": d_pinn_result.get("hist_loss_near0_history", []) if d_pinn_result else [],
+            "loss_segment_lengths": d_pinn_result.get("loss_segment_lengths", []) if d_pinn_result else [],
+            "training_plot_bundle": (
+                d_pinn_result.get("training_plot_bundle") if d_pinn_result else {}
+            ),
             "timing": d_timing,
             "runtime_env": v_runtime_env,
             "valid_prediction_time_classical": d_valid_cl,
@@ -2703,6 +4152,13 @@ def main():
                 p_loss_history=d_pinn_result["loss_history"],
                 p_data_loss_history=d_pinn_result["data_loss_history"],
                 p_physics_loss_history=d_pinn_result["physics_loss_history"],
+                p_hist_loss_history=d_pinn_result.get("history_loss_history"),
+                p_ic_loss_history=d_pinn_result.get("ic_loss_history"),
+                p_loss_segment_lengths=d_pinn_result.get("loss_segment_lengths"),
+                p_hist_loss_far_history=d_pinn_result.get("hist_loss_far_history"),
+                p_hist_loss_mid_history=d_pinn_result.get("hist_loss_mid_history"),
+                p_hist_loss_near0_history=d_pinn_result.get("hist_loss_near0_history"),
+                p_training_plot_bundle=d_pinn_result.get("training_plot_bundle"),
             )
             t_plot_total += time.perf_counter() - t_fig0
 

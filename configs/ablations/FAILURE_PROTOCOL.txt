@@ -1,0 +1,31 @@
+Ablation batch failure protocol (machine-readable notes)
+=======================================================
+
+Status codes in ablation_aggregate.csv
+----------------------------------------
+SUCCESS   Training finished; MSE is finite and below the exploded_mse guard.
+FAILED    bad_mse (NaN/Inf) or exploded_mse (> 1e6 on metric grid).
+EXCEPTION Python exception during f_train_pinn_mackey_glass (see failure_reason).
+
+Optional manual review
+----------------------
+After all seeds for a run_id complete, the runner prints a warning when the
+median MSE across seeds exceeds ``failure_mse_multiplier`` times the median
+MSE of ``baseline_run_id_for_failure`` (see manifest YAML).
+
+Rerun policy (recommended)
+--------------------------
+1. One automatic retry with the same seed only if status=EXCEPTION and the
+   traceback indicates an environment issue (CUDA OOM, etc.).
+2. Do not silently drop FAILED rows; keep them in the CSV and discuss
+   instability in the paper limitations.
+
+Primary endpoints (pre-registered for tables)
+-------------------------------------------
+- MSE vs fine frozen-RK4 reference on N = 200001 points.
+- T_valid(0.1) first exceedance of |e| > 0.1 on the same grid.
+
+Artifacts per seed
+------------------
+- run_manifest.json (merged YAML, metrics, git revision, reference checksum)
+- checkpoints_n{hill}/window_*.pt

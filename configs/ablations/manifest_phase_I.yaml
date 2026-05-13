@@ -1,0 +1,67 @@
+# ---------------------------------------------------------------------------
+# Manifest: Phase I (single-factor ablations vs published baseline B0)
+# ---------------------------------------------------------------------------
+# Merge patches are deep-merged into base_config_path.  Each run_id is
+# replicated on every seed in default_seeds unless ``seeds`` overrides.
+# ---------------------------------------------------------------------------
+
+base_config_path: configs/config_mackey_glass_t200_windowed.yaml
+output_root: results/ablation_runs
+
+n_value: 10.0
+ref_dt: 0.001
+failure_mse_multiplier: 10.0
+baseline_run_id_for_failure: I_B0_baseline
+
+default_seeds:
+  - 42
+  - 1234
+  - 2025
+  - 31415
+  - 99999
+
+valid_thresholds:
+  - 0.05
+  - 0.1
+  - 0.2
+
+runs:
+  - run_id: I_B0_baseline
+    phase_id: "I"
+    merge_patch: {}
+  - run_id: I_M1_junction_continuity
+    phase_id: "I"
+    merge_patch:
+      training:
+        ablation:
+          junction: continuity
+          supervision_orbit: coarse_dt
+          delay_grad: detach
+  - run_id: I_M2_supervision_fine_subsample
+    phase_id: "I"
+    merge_patch:
+      training:
+        ablation:
+          junction: oracle_fine
+          supervision_orbit: fine_subsample
+          delay_grad: detach
+  - run_id: I_M3_delay_coupled
+    phase_id: "I"
+    merge_patch:
+      training:
+        ablation:
+          junction: oracle_fine
+          supervision_orbit: coarse_dt
+          delay_grad: coupled
+  - run_id: I_M4_no_curriculum
+    phase_id: "I"
+    merge_patch:
+      training:
+        ablation:
+          curriculum: false
+  - run_id: I_M5_no_lbfgs
+    phase_id: "I"
+    merge_patch:
+      training:
+        ablation:
+          n_lbfgs: 0

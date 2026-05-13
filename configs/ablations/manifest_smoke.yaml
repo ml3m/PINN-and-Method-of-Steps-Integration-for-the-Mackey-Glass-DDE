@@ -1,0 +1,25 @@
+# Ultra-short budget for CI / smoke test of ablation runner (not for paper numbers).
+
+base_config_path: configs/config_ablation_smoke.yaml
+output_root: results/ablation_smoke
+
+n_value: 10.0
+ref_dt: 0.001
+failure_mse_multiplier: 10.0
+
+default_seeds:
+  - 42
+
+valid_thresholds:
+  - 0.1
+
+runs:
+  - run_id: SMK_baseline
+    phase_id: "SMK"
+    merge_patch: {}
+  - run_id: SMK_continuity
+    phase_id: "SMK"
+    merge_patch:
+      training:
+        ablation:
+          junction: continuity

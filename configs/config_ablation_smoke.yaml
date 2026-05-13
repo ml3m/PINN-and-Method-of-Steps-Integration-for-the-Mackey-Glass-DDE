@@ -1,6 +1,9 @@
+# Copy of windowed paper config with reduced training budget for smoke tests.
+# ---------------------------------------------------------------------------
+
 problem:
   name: mackey_glass_equation
-  description: Mackey-Glass DDE — windowed decomposition on [0,200]
+  description: Mackey-Glass DDE — ablation smoke (short budget)
   beta_true: 2.0
   gamma_true: 1.0
   n: 10.0
@@ -93,26 +96,26 @@ training:
     junction: oracle_fine
     supervision_orbit: coarse_dt
     delay_grad: detach
-  n_collocation: 5000
-  physics_ramp_iters: 600
+  n_collocation: 400
+  physics_ramp_iters: 50
   curriculum: true
   adaptive_sampling: false
   resample_every: 300
   window_size: 25.0
   window_overlap: 5.0
-  n_lbfgs: 500
+  n_lbfgs: 5
   ema_decay: 0.999
   loss_components:
     enable_history: true
     history_samples: 50
   iterations:
-    main: 20000
-  log_interval: 100
+    main: 80
+  log_interval: 40
   random_seed: 1234
   tensorflow_seed: 1234
   lr_schedule:
     type: cosine
-    warmup_steps: 500
+    warmup_steps: 20
     boundaries: []
     values: []
 

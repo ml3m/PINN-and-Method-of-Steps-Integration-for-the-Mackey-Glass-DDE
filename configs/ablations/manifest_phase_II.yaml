@@ -1,0 +1,46 @@
+# ---------------------------------------------------------------------------
+# Manifest: Phase II (2×2 junction × supervision orbit)
+# ---------------------------------------------------------------------------
+
+base_config_path: configs/config_mackey_glass_t200_windowed.yaml
+output_root: results/ablation_runs
+
+n_value: 10.0
+ref_dt: 0.001
+failure_mse_multiplier: 10.0
+
+default_seeds:
+  - 42
+  - 1234
+  - 2025
+  - 31415
+  - 99999
+
+valid_thresholds:
+  - 0.05
+  - 0.1
+  - 0.2
+
+runs:
+  - run_id: II_J0_S0_oracle_coarse_dt
+    phase_id: "II"
+    merge_patch: {}
+  - run_id: II_J0_S1_oracle_fine_subsample
+    phase_id: "II"
+    merge_patch:
+      training:
+        ablation:
+          supervision_orbit: fine_subsample
+  - run_id: II_J1_S0_cont_coarse_dt
+    phase_id: "II"
+    merge_patch:
+      training:
+        ablation:
+          junction: continuity
+  - run_id: II_J1_S1_cont_fine_subsample
+    phase_id: "II"
+    merge_patch:
+      training:
+        ablation:
+          junction: continuity
+          supervision_orbit: fine_subsample
