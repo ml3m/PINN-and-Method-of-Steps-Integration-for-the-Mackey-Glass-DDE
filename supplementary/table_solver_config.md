@@ -5,10 +5,10 @@ Method-of-steps solver configuration used in this study.
 | Setting | Value |
 |---|---|
 | ODE method | RK45 (Dormand–Prince) |
-| Relative tolerance (rtol) | 10⁻⁹ |
-| Absolute tolerance (atol) | 10⁻¹¹ |
-| Maximum step (Δt_max) | 0.01 |
-| Output grid spacing | Δt = 0.01 |
+| Relative tolerance (rtol) | $10^{-9}$ |
+| Absolute tolerance (atol) | $10^{-11}$ |
+| Maximum step ($\Delta t_{\max}$) | 0.01 |
+| Output grid spacing | $\Delta t = 0.01$ |
 | History interpolation | cubic spline |
-| Number of delay sub-intervals K | ⌈T/τ⌉ = 100 |
+| Number of delay sub-intervals $K$ | $\lceil T/\tau \rceil = 100$ |
 | Output points | 20,001 |
