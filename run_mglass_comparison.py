@@ -2194,7 +2194,7 @@ def f_export_3d_overlay(
             v_ftick=_FONT_TICK, v_fleg=_FONT_LEGEND,
         )
 
-    _GRID_W, _GRID_H = 10.0, 12.0
+    _GRID_W, _GRID_H = 10.0, 8.0
     _GTITLE, _GLABEL, _GTICK, _GLEG = 9, 8, 6, 6
 
     fig_g = plt.figure(figsize=(_GRID_W, _GRID_H))
@@ -2222,15 +2222,13 @@ def f_export_3d_overlay(
             p_alpha_cl=_ALPHA_CL,
             p_alpha_pinn=_ALPHA_PINN,
             p_bounds=v_bounds,
-            p_show_title=True,
+            p_show_title=False,
             p_show_legend=(v_i == 0),
             p_title_suffix=f" ({v_panel})",
         )
-    fig_g.suptitle(
-        f"Mackey-Glass ($n={p_n_value:g}$) — 3D delay embedding overlays",
-        fontsize=12, fontweight="bold", y=0.995,
-    )
-    fig_g.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+        ax_g.text2D(0.05, 0.95, f"({v_panel})", transform=ax_g.transAxes,
+                    fontsize=_GTITLE + 1, fontweight="bold", va="top")
+    fig_g.tight_layout(h_pad=1.0, w_pad=1.0)
     v_grid_path = f"{v_base}_2x2.png"
     _save(fig_g, v_grid_path)
 
